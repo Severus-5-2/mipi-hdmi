@@ -1,1 +1,0 @@
-# mipi-hdmi
