@@ -1,0 +1,67 @@
+{
+  "hardware_config": {
+    "type": "custom",
+    "language": "verilog",
+    "vendor_id": "anlogic",
+    "vendor_name": "安路科技",
+    "chip_series": "PH1P",
+    "chip_device": "PH1P35MDG324",
+    "package_code": "LFBGA324",
+    "package_label": "LFBGA324",
+    "full_part_number": "PH1P35MDG324",
+    "chip_resources": {
+      "lut4_approx": 38189,
+      "bram_kb": 2160,
+      "dsp_blocks": 40,
+      "io_banks": 1,
+      "package_data_status": "official_table_model"
+    },
+    "board_id": "",
+    "board_name": "安路科技 · PH1P · PH1P35MDG324 · LFBGA324",
+    "toolchain": [
+      "td"
+    ],
+    "uploads": {
+      "boardInfo": {
+        "name": "SC520CS-03_数据手册_V1.6.pdf",
+        "size": 3263345,
+        "path": "doc/refs/fpgahw-8694ad-SC520CS-03_数据手册_V1.6.pdf",
+        "status": "uploaded"
+      },
+      "pinmap": null,
+      "schematic": {
+        "name": "新HX1P35A开发板手册-HDL版2604.pdf",
+        "size": 2590885,
+        "path": "doc/refs/fpgahw-5a8f35-新HX1P35A开发板手册-HDL版2604.pdf",
+        "status": "uploaded"
+      },
+      "constraints": {
+        "name": "pin.adc",
+        "size": 1601,
+        "path": "doc/refs/fpgahw-82343b-pin.adc",
+        "status": "uploaded"
+      },
+      "recommend": null
+    },
+    "packagedOnly": true,
+    "hideLegacy": true,
+    "status": "complete",
+    "chip_confirmed": false,
+    "package_options": [
+      {
+        "package_code": "LFBGA324",
+        "pins": [],
+        "pin_count": 324,
+        "package_family": "LFBGA",
+        "package_size_mm": null,
+        "ball_pitch_mm": null,
+        "source": "Anlogic official product selection table",
+        "label": "LFBGA324"
+      }
+    ],
+    "schema": "iccoder.hardware_config.v2",
+    "version": "2.0",
+    "updated_at": "2026-10-02T07:34:08.283Z",
+    "config_path": "doc/hw/config.json"
+  }
+}
