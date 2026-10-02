@@ -6,24 +6,30 @@
 *.bit.gz
 *.mcs.gz
 
-# ===== 日志/临时文件 =====
+# ===== 日志/报告/临时文件 =====
 *.log
+*.logw
+*.timingsummary
 *.bak
 *.tmp
 *.swp
 *.old
+.lock.f
 ~$*
 
-# ===== IP工具自动备份目录（可重建，不提交）=====
+# ===== IP工具自动备份目录（可重建）=====
 .IpToolIpDataBackupDir_*
 .ipToolIpDataBackupDir_*
 
-# ===== 综合/布局布线 运行目录 =====
+# ===== 工程编译运行目录 =====
+**/td_project/*_Runs/
+**/td_project/log/
+**/td_project/al_ip/
 **/Runs/
 **/syn_run/
 **/phy_run/
 
-# ===== 系统/编辑器临时文件 =====
+# ===== 系统/编辑器 =====
 Thumbs.db
 Desktop.ini
 .DS_Store

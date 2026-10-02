@@ -29,6 +29,7 @@ MIPI 摄像头 → CSI/RAW10 解包 → ISP (去马赛克 / 白平衡) → DDR �
 
 ## 工程结构
 
+```
 ├── td_project/                    # TD 工程文件
 │   ├── camera_to_dsi_display.al       # 工程文件（TD 打开它）
 │   └── camera_to_dsi_display.sdc      # 时序约束
@@ -45,6 +46,8 @@ MIPI 摄像头 → CSI/RAW10 解包 → ISP (去马赛克 / 白平衡) → DDR �
 │   │   └── ...
 │   ├── ip_source/                     # IP 核（PLL / FIFO / ERAM / divider）
 │   └── doc/                           # 设计文档与报告
+```
+
 
 
 
