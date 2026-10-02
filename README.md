@@ -29,18 +29,23 @@ MIPI 摄像头 → CSI/RAW10 解包 → ISP (去马赛克 / 白平衡) → DDR �
 
 ## 工程结构
 
-├── constraints_source/     # 引脚与时序约束
-│   ├── pin.adc
-│   └── timing.sdc
-├── hdl_source/             # Verilog 源代码
-│   ├── design_top_wrapper.v   # 顶层模块
-│   ├── rgb2gray.v             # 灰度化
-│   ├── binarize.v             # 二值化
-│   ├── sobel_3x3.v            # Sobel 边缘检测
-│   ├── pixel_mux_4to1.v       # 四路像素选择器
-│   └── ...
-├── ip_source/              # IP 核（PLL / FIFO / ERAM /divider）
-└── doc/                    # 设计文档与报告
+├── td_project/                    # TD 工程文件
+│   ├── camera_to_dsi_display.al       # 工程文件（TD 打开它）
+│   └── camera_to_dsi_display.sdc      # 时序约束
+├── user_source/                   # 源文件
+│   ├── constraints_source/            # 引脚与时序约束
+│   │   ├── pin.adc
+│   │   └── timing.sdc
+│   ├── hdl_source/                    # Verilog 源代码
+│   │   ├── design_top_wrapper.v       # 顶层模块
+│   │   ├── rgb2gray.v                 # 灰度化
+│   │   ├── binarize.v                 # 二值化
+│   │   ├── sobel_3x3.v                # Sobel 边缘检测
+│   │   ├── pixel_mux_4to1.v           # 四路像素选择器
+│   │   └── ...
+│   ├── ip_source/                     # IP 核（PLL / FIFO / ERAM / divider）
+│   └── doc/                           # 设计文档与报告
+
 
 
 ## 关键算法
