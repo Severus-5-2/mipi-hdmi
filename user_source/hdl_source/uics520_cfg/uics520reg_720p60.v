@@ -1,15 +1,28 @@
 `timescale 1ns / 1ps
 
 /*
- * SC520CS原厂HD模式：1280x720@60fps，24MHz MCLK，2-Lane RAW10，
- * Lane速率828Mbps，Sensor内部启用VBIN和HSUB，直接输出真实720p。
+ * SC520CS 原厂 HD 模式：1280x720@60fps，24MHz MCLK，2-Lane RAW10，
+ * Lane 速率 828Mbps，Sensor 内部启用 VBIN 和 HSUB，直接输出真实 720p。
+ *
+ * 2026-10-02 修复（曝光不足、画面全黑）：
+ * 数据手册规定 0x3812 默认 0x00 = Group hold 启动；曝光/增益必须
+ * 走"打包 → 释放（0x3812=0x30）"，并在"0x30 之后第 1 个帧"才生效。
+ *
+ * 关键：Group hold 序列必须在 stream on 之后写入（此时已有帧），
+ * 若在 stream on 之前释放，sensor 尚未出帧，曝光/增益不会生效。
+ *
+ * 因此本文件把顺序调整为：
+ *   全部模式寄存器 → stream on(0x0100=0x01) → Group hold 打包
+ *   最大曝光 1991 + 16 倍模拟增益 → 释放，下一帧真实画面即变亮。
+ * 不依赖 AE 握手，上电即有确定亮度。
  */
 module uics520reg_720p60 (
     input  wire [8:0]  REG_INDEX,
     output reg  [23:0] REG_DATA,
     output wire [8:0]  REG_SIZE
 );
-    assign REG_SIZE = 9'd165;
+    // 0~102 模式寄存器；103~159 原后段配置；160 stream on；161~168 Group hold
+    assign REG_SIZE = 9'd169;
 
     always @(*) begin
         case (REG_INDEX)
@@ -37,14 +50,14 @@ module uics520reg_720p60 (
             9'd21: REG_DATA = {16'h320a, 8'h02}; // output height high: 720
             9'd22: REG_DATA = {16'h320b, 8'hd0};
             9'd23: REG_DATA = {16'h320e, 8'h03};
-            9'd24: REG_DATA = {16'h320f, 8'he8};
+            9'd24: REG_DATA = {16'h320f, 8'he8};  // VTS = 0x03e8 = 1000
             9'd25: REG_DATA = {16'h3210, 8'h00};
             9'd26: REG_DATA = {16'h3211, 8'h0a};
             9'd27: REG_DATA = {16'h3212, 8'h00};
             9'd28: REG_DATA = {16'h3213, 8'h04};
             9'd29: REG_DATA = {16'h3215, 8'h31};
-            9'd30: REG_DATA = {16'h3220, 8'h81}; // 原厂VBIN/HSUB Slave模式
-            9'd31: REG_DATA = {16'h3222, 8'h00}; // 验证：关闭Slave模式
+            9'd30: REG_DATA = {16'h3220, 8'h81}; // 原厂 VBIN/HSUB Slave 模式
+            9'd31: REG_DATA = {16'h3222, 8'h00}; // 关闭 Slave，自由运行(master)
             9'd32: REG_DATA = {16'h3224, 8'h92};
             9'd33: REG_DATA = {16'h322e, 8'h03};
             9'd34: REG_DATA = {16'h322f, 8'he4};
@@ -116,70 +129,80 @@ module uics520reg_720p60 (
             9'd100: REG_DATA = {16'h391d, 8'h01};
             9'd101: REG_DATA = {16'h3926, 8'h23};
             9'd102: REG_DATA = {16'h3c04, 8'h01};
-            9'd103: REG_DATA = {16'h3e00, 8'h00};
-            9'd104: REG_DATA = {16'h3e01, 8'h7c};
-            9'd105: REG_DATA = {16'h3e02, 8'h70};
-            9'd106: REG_DATA = {16'h3e09, 8'h00};
-            9'd107: REG_DATA = {16'h4401, 8'h13};
-            9'd108: REG_DATA = {16'h4402, 8'h03};
-            9'd109: REG_DATA = {16'h4403, 8'h0b};
-            9'd110: REG_DATA = {16'h4404, 8'h21};
-            9'd111: REG_DATA = {16'h4405, 8'h29};
-            9'd112: REG_DATA = {16'h4407, 8'h0c};
-            9'd113: REG_DATA = {16'h440c, 8'h34};
-            9'd114: REG_DATA = {16'h440d, 8'h34};
-            9'd115: REG_DATA = {16'h440e, 8'h29};
-            9'd116: REG_DATA = {16'h440f, 8'h3f};
-            9'd117: REG_DATA = {16'h4412, 8'h01};
-            9'd118: REG_DATA = {16'h4424, 8'h01};
-            9'd119: REG_DATA = {16'h442d, 8'h00};
-            9'd120: REG_DATA = {16'h442e, 8'h00};
-            9'd121: REG_DATA = {16'h4509, 8'h28};
-            9'd122: REG_DATA = {16'h450d, 8'h19};
-            9'd123: REG_DATA = {16'h451d, 8'h28};
-            9'd124: REG_DATA = {16'h4526, 8'h05};
-            9'd125: REG_DATA = {16'h4819, 8'h0d};
-            9'd126: REG_DATA = {16'h481b, 8'h07};
-            9'd127: REG_DATA = {16'h481d, 8'h1c};
-            9'd128: REG_DATA = {16'h481f, 8'h06};
-            9'd129: REG_DATA = {16'h4821, 8'h0c};
-            9'd130: REG_DATA = {16'h4823, 8'h07};
-            9'd131: REG_DATA = {16'h4825, 8'h06};
-            9'd132: REG_DATA = {16'h4827, 8'h06};
-            9'd133: REG_DATA = {16'h4829, 8'h0b};
-            9'd134: REG_DATA = {16'h5000, 8'h4e};
-            9'd135: REG_DATA = {16'h5007, 8'h00};
-            9'd136: REG_DATA = {16'h550e, 8'h00};
-            9'd137: REG_DATA = {16'h550f, 8'h8a}; // SC520CS-03料号配置
-            9'd138: REG_DATA = {16'h5780, 8'h66};
-            9'd139: REG_DATA = {16'h5787, 8'h08};
-            9'd140: REG_DATA = {16'h5788, 8'h04};
-            9'd141: REG_DATA = {16'h5789, 8'h01};
-            9'd142: REG_DATA = {16'h578d, 8'h40};
-            9'd143: REG_DATA = {16'h5790, 8'h08};
-            9'd144: REG_DATA = {16'h5791, 8'h04};
-            9'd145: REG_DATA = {16'h5792, 8'h01};
-            9'd146: REG_DATA = {16'h5799, 8'h46};
-            9'd147: REG_DATA = {16'h57aa, 8'heb};
-            9'd148: REG_DATA = {16'h5901, 8'h04};
-            9'd149: REG_DATA = {16'h59f0, 8'h00};
-            9'd150: REG_DATA = {16'h5ae0, 8'hfe};
-            9'd151: REG_DATA = {16'h5ae1, 8'h40};
-            9'd152: REG_DATA = {16'h5ae2, 8'h38};
-            9'd153: REG_DATA = {16'h5ae3, 8'h30};
-            9'd154: REG_DATA = {16'h5ae4, 8'h0c};
-            9'd155: REG_DATA = {16'h5ae5, 8'h38};
-            9'd156: REG_DATA = {16'h5ae6, 8'h30};
-            9'd157: REG_DATA = {16'h5ae7, 8'h28};
-            9'd158: REG_DATA = {16'h5ae8, 8'h3f};
-            9'd159: REG_DATA = {16'h5ae9, 8'h34};
-            9'd160: REG_DATA = {16'h5aea, 8'h2c};
-            9'd161: REG_DATA = {16'h5aeb, 8'h3f};
-            9'd162: REG_DATA = {16'h5aec, 8'h34};
-            9'd163: REG_DATA = {16'h5aed, 8'h2c};
-            9'd164: REG_DATA = {16'h0100, 8'h01}; // stream on
+
+            // ===== 原后段配置（原 index 111~167 顺延为 103~159）=====
+            9'd103: REG_DATA = {16'h4401, 8'h13};
+            9'd104: REG_DATA = {16'h4402, 8'h03};
+            9'd105: REG_DATA = {16'h4403, 8'h0b};
+            9'd106: REG_DATA = {16'h4404, 8'h21};
+            9'd107: REG_DATA = {16'h4405, 8'h29};
+            9'd108: REG_DATA = {16'h4407, 8'h0c};
+            9'd109: REG_DATA = {16'h440c, 8'h34};
+            9'd110: REG_DATA = {16'h440d, 8'h34};
+            9'd111: REG_DATA = {16'h440e, 8'h29};
+            9'd112: REG_DATA = {16'h440f, 8'h3f};
+            9'd113: REG_DATA = {16'h4412, 8'h01};
+            9'd114: REG_DATA = {16'h4424, 8'h01};
+            9'd115: REG_DATA = {16'h442d, 8'h00};
+            9'd116: REG_DATA = {16'h442e, 8'h00};
+            9'd117: REG_DATA = {16'h4509, 8'h28};
+            9'd118: REG_DATA = {16'h450d, 8'h19};
+            9'd119: REG_DATA = {16'h451d, 8'h28};
+            9'd120: REG_DATA = {16'h4526, 8'h05};
+            9'd121: REG_DATA = {16'h4819, 8'h0d};
+            9'd122: REG_DATA = {16'h481b, 8'h07};
+            9'd123: REG_DATA = {16'h481d, 8'h1c};
+            9'd124: REG_DATA = {16'h481f, 8'h06};
+            9'd125: REG_DATA = {16'h4821, 8'h0c};
+            9'd126: REG_DATA = {16'h4823, 8'h07};
+            9'd127: REG_DATA = {16'h4825, 8'h06};
+            9'd128: REG_DATA = {16'h4827, 8'h06};
+            9'd129: REG_DATA = {16'h4829, 8'h0b};
+            9'd130: REG_DATA = {16'h5000, 8'h4e};
+            9'd131: REG_DATA = {16'h5007, 8'h00};
+            9'd132: REG_DATA = {16'h550e, 8'h00};
+            9'd133: REG_DATA = {16'h550f, 8'h8a}; // SC520CS-03 料号配置
+            9'd134: REG_DATA = {16'h5780, 8'h66};
+            9'd135: REG_DATA = {16'h5787, 8'h08};
+            9'd136: REG_DATA = {16'h5788, 8'h04};
+            9'd137: REG_DATA = {16'h5789, 8'h01};
+            9'd138: REG_DATA = {16'h578d, 8'h40};
+            9'd139: REG_DATA = {16'h5790, 8'h08};
+            9'd140: REG_DATA = {16'h5791, 8'h04};
+            9'd141: REG_DATA = {16'h5792, 8'h01};
+            9'd142: REG_DATA = {16'h5799, 8'h46};
+            9'd143: REG_DATA = {16'h57aa, 8'heb};
+            9'd144: REG_DATA = {16'h5901, 8'h04};
+            9'd145: REG_DATA = {16'h59f0, 8'h00};
+            9'd146: REG_DATA = {16'h5ae0, 8'hfe};
+            9'd147: REG_DATA = {16'h5ae1, 8'h40};
+            9'd148: REG_DATA = {16'h5ae2, 8'h38};
+            9'd149: REG_DATA = {16'h5ae3, 8'h30};
+            9'd150: REG_DATA = {16'h5ae4, 8'h0c};
+            9'd151: REG_DATA = {16'h5ae5, 8'h38};
+            9'd152: REG_DATA = {16'h5ae6, 8'h30};
+            9'd153: REG_DATA = {16'h5ae7, 8'h28};
+            9'd154: REG_DATA = {16'h5ae8, 8'h3f};
+            9'd155: REG_DATA = {16'h5ae9, 8'h34};
+            9'd156: REG_DATA = {16'h5aea, 8'h2c};
+            9'd157: REG_DATA = {16'h5aeb, 8'h3f};
+            9'd158: REG_DATA = {16'h5aec, 8'h34};
+            9'd159: REG_DATA = {16'h5aed, 8'h2c};
+
+            // ===== Stream on：sensor 开始连续出帧 =====
+            9'd160: REG_DATA = {16'h0100, 8'h01}; // stream on
+
+            // ===== Stream on 后 Group hold 打包：曝光/增益（此时已有帧）=====
+            9'd161: REG_DATA = {16'h3812, 8'h00}; // Group hold 启动
+            9'd162: REG_DATA = {16'h3e00, 8'h00}; // 曝光[19:16]
+            9'd163: REG_DATA = {16'h3e01, 8'h7c}; // 曝光[15:8]
+            9'd164: REG_DATA = {16'h3e02, 8'h70}; // 曝光[7:0]，合成 0x7c7 = 1991
+            9'd165: REG_DATA = {16'h3e09, 8'h1f}; // 模拟增益 32x（最大）
+            9'd166: REG_DATA = {16'h3e06, 8'h01}; // 数字粗增益 2x
+            9'd167: REG_DATA = {16'h3e07, 8'hfc}; // 数字细增益 ≈4x（数字总增益约4x）
+            9'd168: REG_DATA = {16'h3812, 8'h30}; // Group hold 释放，下一帧生效
+
             default: REG_DATA = {16'h0000, 8'h00};
         endcase
     end
 endmodule
-

@@ -205,6 +205,11 @@ module design_top_wrapper (
     wire[3:0]   S_hdmi_debug_status;
     wire        S_lane_error_any;
 
+    wire [23:0] S_proc_rgb_out;    //多路选择器输出→送hdmi_mixer
+    wire [23:0] S_video_bright;    // 亮度增强后的像素（所有算法共用）
+    wire [1:0] S_mode_sel;         // 拨码开关模式选择（2位！）
+
+
     //===== 新增图像处理信号（S_hdmi_pixel_clk域）=====
     wire [7:0]  S_gray_out;        //RGB转灰度输出
     wire [23:0] S_rgb_gray;        //灰度扩展为24bit
@@ -448,12 +453,25 @@ module design_top_wrapper (
         S_vi_ddr_wr_en
     };
 
+     //0. 数字亮度增强（放在所有算法之前，各模式延迟一致、mux 对齐）
+    brightness_gain #(
+        .GAIN (2)                  // 增益倍数：2=提亮一倍，不够改3、4
+    ) u_brightness_gain(
+        .clk    (S_hdmi_pixel_clk),
+        .rst_n  (S_hdmi_rst_n),
+        .rgb_in (S_video_rd_data),
+        .rgb_out(S_video_bright)
+    );
+
+    //1. RGB转灰度
+
+
 
     //1. RGB转灰度
     rgb2gray u_rgb2gray(
         .clk      (S_hdmi_pixel_clk),
         .rst_n    (S_hdmi_rst_n),
-        .rgb_in   (S_video_rd_data),
+        .rgb_in   (S_video_bright),
         .gray_out (S_gray_out)
     );
 
@@ -487,7 +505,7 @@ module design_top_wrapper (
         .clk     (S_hdmi_pixel_clk),
         .rst_n   (S_hdmi_rst_n),
         .mode    (S_mode_sel),
-        .rgb0    (S_video_rd_data),
+        .rgb0    (S_video_bright),
         .rgb1    (S_rgb_gray),
         .rgb2    (S_rgb_bin),
         .rgb3    (S_rgb_sobel),
