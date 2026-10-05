@@ -205,10 +205,9 @@ module design_top_wrapper (
     wire[3:0]   S_hdmi_debug_status;
     wire        S_lane_error_any;
 
-    wire [23:0] S_proc_rgb_out;    //多路选择器输出→送hdmi_mixer
+    
     wire [23:0] S_video_bright;    // 亮度增强后的像素（所有算法共用）
-    wire [1:0] S_mode_sel;         // 拨码开关模式选择（2位！）
-
+    
 
     //===== 新增图像处理信号（S_hdmi_pixel_clk域）=====
     wire [7:0]  S_gray_out;        //RGB转灰度输出
