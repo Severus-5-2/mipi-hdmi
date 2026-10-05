@@ -1,23 +1,42 @@
-# ===== 安路TD 编译/下载产物 =====
+# ============================================================
+#  MIPI-HDMI 工程忽略规则（安路 TangDynasty TD）
+#  说明：只忽略"可由工具重新生成"的产物与本地环境文件，
+#        源码（.v/.sv/.py/.md）、约束（.adc/.sdc）、IP 配置
+#        （Design.xml 等）、工程文件（.al）都必须入库。
+# ============================================================
+
+# ===== 安路 TD 编译/下载产物 =====
 *.bit
 *.mcs
 *.bin
 *.svf
+*.rpt
 *.bit.gz
 *.mcs.gz
+*.bid
+*.qor
+*.status
+*.area
+*.prj
+*.cfg
 
-# ===== 日志/报告/临时文件 =====
+# ===== 日志 / 报告 / 临时文件 =====
 *.log
 *.logw
+*.timing
 *.timingsummary
+*.jou
+*.str
 *.bak
 *.tmp
 *.swp
 *.old
+*.htm
+*.html
 .lock.f
 ~$*
 
-# ===== IP工具自动备份目录（可重建）=====
+# ===== IP 工具自动备份目录（可重建）=====
 .IpToolIpDataBackupDir_*
 .ipToolIpDataBackupDir_*
 
@@ -28,8 +47,25 @@
 **/Runs/
 **/syn_run/
 **/phy_run/
+**/_tmp/
+**/tmp/
 
-# ===== 系统/编辑器 =====
+# ===== 编辑器 / IDE 本地配置 =====
+.vscode/
+.idea/
+*.code-workspace
+*.user
+*.suo
+
+# ===== Python 脚本（gamma LUT 生成器）缓存 =====
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== 过程产物：数据手册文本抽取（可重新生成，且有版权风险）=====
+user_source/hdl_source/gamma_fix/refs/
+
+# ===== 系统 / 编辑器 =====
 Thumbs.db
 Desktop.ini
 .DS_Store

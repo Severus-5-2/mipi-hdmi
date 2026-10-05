@@ -10,8 +10,8 @@ module design_top_wrapper (
     output wire       O_cam_rst,
       
     inout wire [1:0]  I_button,
-    input             I_sw1,   // 拨码开关SW1（A4），拨上=1
-    input             I_sw2,   // 拨码开关SW2（B4），拨上=1
+    input             I_sw1,   // 拨码开关SW1（A4），拨上=0，拨下=1（实测确认）
+    input             I_sw2,   // 拨码开关SW2（B4），拨上=0，拨下=1（实测确认）
 
 
     output wire       O_screen_pwm,
@@ -220,7 +220,7 @@ module design_top_wrapper (
 
 
     // ===== 拨码开关模式选择 =====
-    // 拨码开关是静态电平：拨上=1，拨下=0，无需消抖
+    // 拨码开关是静态电平：拨上=0，拨下=1（注意与上拉方向相反，实测确认），无需消抖
     // 只需双拍同步防亚稳态
     reg [1:0] sw_sync1;
     reg [1:0] sw_sync2;
@@ -453,10 +453,16 @@ module design_top_wrapper (
         S_vi_ddr_wr_en
     };
 
-     //0. 数字亮度增强（放在所有算法之前，各模式延迟一致、mux 对齐）
-    brightness_gain #(
-        .GAIN (2)                  // 增益倍数：2=提亮一倍，不够改3、4
-    ) u_brightness_gain(
+    //0. 黑电平扣除 + Gamma 校正（替代原 brightness_gain）
+    //   目的：解决线性 RAW 直接上屏造成的"雾感/发暗/颜色闷"
+    //   处理顺序：先扣黑电平（线性域偏移）-> 再做 Gamma 查表（非线性映射）
+    //   流水线延迟与原 brightness_gain 一致（1 拍），下游算法链的对齐关系不变
+    //   输出信号名沿用 S_video_bright，灰度/二值化/Sobel/mux 均无需改动
+    gamma_lut #(
+        .EN_GAMMA (1     ),   // 1:启用Gamma校正；改 0 可上板做 A/B 对比
+        .EN_BLC   (1     ),   // 1:扣除黑电平；改 0 关闭
+        .BL_LEVEL (8'd16 )    // 8bit域黑电平(=RAW10域64>>2)；画面发灰→调大，暗部出亮噪点→调小
+    ) u_gamma_lut(
         .clk    (S_hdmi_pixel_clk),
         .rst_n  (S_hdmi_rst_n),
         .rgb_in (S_video_rd_data),

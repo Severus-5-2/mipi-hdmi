@@ -331,7 +331,7 @@
                     <Attr Name="CompileOrder" Val="55"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/brightness_gain.v">
+            <File Path="../user_source/hdl_source/gamma_lut.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>

@@ -1,44 +1,106 @@
 `timescale 1ns / 1ps
 
-// Convert the demo's gain control (16..176) to SC520CS gain registers.
-// Value 176 selects the maximum 32x analog stage and unity digital gain.
-// O[23:16] -> 0x3e09 analog coarse gain
-// O[15:8]  -> 0x3e06 digital coarse gain
-// O[7:0]   -> 0x3e07 digital fine gain (0x80 = 1x)
+//=============================================================================
+//  SC520CS 增益阶梯表（2026-10-05 重构版）
+//  路径：user_source/hdl_source/sc520_ae_fix/SC520GainTbl.v
+//  说明：本文件模块名与原 uics520_cfg/SC520GainTbl.v 相同，用于整体替换。
+//        在 TD 工程中请先把原文件从工程里移除，再加入本文件，否则
+//        会出现模块重复定义错误。
+//
+//  【为什么重构】
+//    1) 原表从不使用数字粗增益 0x3e06（恒为 0x00），因此即使 ae_set 把
+//       r_ag 拉到上限 176，最多也只能得到 32x；
+//    2) 初始化表里写的 32x模拟 + 2x数字 + 1.969x细 = 126x 又在上电后被
+//       AE 首次写入覆盖掉，导致实际生效只有 16x，画面比应有的亮度暗
+//       7.9 倍（约 18 dB）——这就是"画面发暗"的根因；
+//    3) 原表在 r_ag 175→176 处存在回跳（前者是 16x模拟×1.969细 = 32x，
+//       后者是 32x模拟×1倍细 = 32x，增益不增反平）。
+//    本表把数字增益纳入阶梯，使 r_ag 能连续映射到手册规定的最大 126x。
+//
+//  【手册依据】SC520CS-03 数据手册 V1.6
+//    0x3e09 模拟增益（表 2-4）：
+//        00=1x  08=2x  09=4x  0B=8x  0F=16x  1F=32x
+//    0x3e06 数字粗增益（表 2-5）：00=1x   01=2x
+//    0x3e07 数字细增益（表 2-5）：80=1x …  FC=1.969x，精度 1/32
+//    → 系统最大总增益 = 32 × 2 × 1.969 ≈ 126x
+//    → 手册建议：优先用模拟增益，模拟到顶后再启用数字增益，本表遵循此顺序。
+//
+//  【地址映射】I_AG = AG_MIN + 段号 s(0~6) × 32 + 段内步进 r(0~31)，共 7 段
+//    段 s=0..5：模拟增益依次 1/2/4/8/16/32x，数字粗增益恒 1x
+//               段 s=5 末端 = 32 × 1.969 ≈ 63x（纯模拟区域的天花板）
+//    段 s=6    ：模拟增益锁 32x，启用数字粗增益 2x，段内继续升细增益
+//               段首 = 32 × 2 × 1.000 = 64x，段末 = 32 × 2 × 1.969 ≈ 126x
+//    上述地址已覆盖全部可达增益，I_AG 再大一律钳位到最大值 126x。
+//    单调性：段内递增、跨段递增（63x → 64x 平滑过渡），全程无回跳。
+//
+//  【常用档位速查】（I_AG → 实际总增益）
+//     16 →   1x    // 最低
+//    144 →  16x    // ← 原 ae_set 默认值，也就是你现在看到的亮度
+//    176 →  32x    // 纯模拟最大，噪声最小（比现在亮 2 倍）
+//    207 →  63x    // ← 本版默认值：32x模拟 × 1.969x细（比现在亮 4 倍）
+//    224 →  80x    // 数字粗增益已启用
+//    239 → 126x    // 系统上限，噪点会比较明显
+//=============================================================================
+
 module SC520GainTbl (
-    input  wire [15:0] I_AG,
-    output reg  [23:0] O
+    input  wire [15:0] I_AG,      // 来自 ae_set 的增益控制字 16~239
+    output reg  [23:0] O          // [23:16]→0x3e09 模拟增益
+                                  // [15:8] →0x3e06 数字粗增益
+                                  // [7:0]  →0x3e07 数字细增益
 );
-    reg [7:0] step;
-    reg [7:0] fine_gain;
+
+    //-----------------------------------------------------------------
+    // 参数区
+    //-----------------------------------------------------------------
+    localparam [15:0] AG_MIN = 16;    // 增益控制字下限（1x）
+    localparam [15:0] AG_MAX = 239;   // 增益控制字上限（=126x，见文件头说明）
+    localparam [15:0] STEP_MAX = 223; // AG_MAX 对应的归一化步进（第 6 段最后一级）
+
+    //-----------------------------------------------------------------
+    // 中间变量
+    //-----------------------------------------------------------------
+    reg [15:0] step;      // 归一化后的步进值 0~255
+    reg [ 2:0] seg;       // 段号 0~7
+    reg [ 4:0] fine_step; // 段内步进 0~31
+    reg [ 7:0] ana_gain;  // 0x3e09 模拟增益寄存器值
+    reg [ 7:0] dig_gain;  // 0x3e06 数字粗增益寄存器值
+    reg [ 7:0] fine_gain; // 0x3e07 数字细增益寄存器值
 
     always @(*) begin
-        if (I_AG <= 16)
-            step = 8'd0;
-        else if (I_AG >= 176)
-            step = 8'd160;
+        // 1) 限幅：把 I_AG 夹到 [AG_MIN, AG_MAX] 内，避免越界产生非法寄存器值
+        //    特别注意：超过 STEP_MAX 的地址没有对应含义务，
+        //    必须钳位而不是让它自然回绕到低增益，否则会出现"越按越暗"。
+        if (I_AG <= AG_MIN)
+            step = 16'd0;
+        else if (I_AG >= AG_MAX)
+            step = STEP_MAX;
         else
-            step = I_AG - 16;
+            step = I_AG - AG_MIN;
 
-        if (step < 32) begin
-            fine_gain = 8'h80 + (step << 2);
-            O = {8'h00, 8'h00, fine_gain};
-        end else if (step < 64) begin
-            fine_gain = 8'h80 + ((step - 32) << 2);
-            O = {8'h08, 8'h00, fine_gain};
-        end else if (step < 96) begin
-            fine_gain = 8'h80 + ((step - 64) << 2);
-            O = {8'h09, 8'h00, fine_gain};
-        end else if (step < 128) begin
-            fine_gain = 8'h80 + ((step - 96) << 2);
-            O = {8'h0b, 8'h00, fine_gain};
-        end else if (step < 160) begin
-            fine_gain = 8'h80 + ((step - 128) << 2);
-            O = {8'h0f, 8'h00, fine_gain};
-        end else begin
-            fine_gain = 8'h80;
-            O = {8'h1f, 8'h00, fine_gain};
-        end
+        // 2) 拆分成"段号 + 段内步进"：每段 32 级，共 7 段（0~6）
+        seg       = step[7:5];        // 高 3 位 → 段号（最大 6）
+        fine_step = step[4:0];        // 低 5 位 → 段内步进
+
+        // 3) 细增益：0x80(1x) → 0xFC(1.969x)，步进 4，与手册 1/32 精度一致
+        //    fine_step 最大 31 → 0x80 + 124 = 0xFC，不会溢出
+        fine_gain = 8'h80 + (fine_step << 2);
+
+        // 4) 模拟增益与数字粗增益：
+        //    段 0~5 走完整模拟阶梯且不加数字增益；
+        //    模拟到顶（32x）后，段 6~7 才启用数字粗增益 2x。
+        case (seg)
+            3'd0: begin ana_gain = 8'h00; dig_gain = 8'h00; end  // 模拟 1x
+            3'd1: begin ana_gain = 8'h08; dig_gain = 8'h00; end  // 模拟 2x
+            3'd2: begin ana_gain = 8'h09; dig_gain = 8'h00; end  // 模拟 4x
+            3'd3: begin ana_gain = 8'h0b; dig_gain = 8'h00; end  // 模拟 8x
+            3'd4: begin ana_gain = 8'h0f; dig_gain = 8'h00; end  // 模拟 16x
+            3'd5: begin ana_gain = 8'h1f; dig_gain = 8'h00; end  // 模拟 32x（段末≈63x）
+            3'd6: begin ana_gain = 8'h1f; dig_gain = 8'h01; end  // 32x + 数字 2x（64x→126x）
+            default: begin ana_gain = 8'h1f; dig_gain = 8'h01; end  // 兜底锁最大增益
+        endcase
+
+        // 5) 打包输出，位段顺序必须与 uics520regAE.v 的写入顺序一致
+        O = {ana_gain, dig_gain, fine_gain};
     end
-endmodule
 
+endmodule
