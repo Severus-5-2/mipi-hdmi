@@ -205,17 +205,18 @@ module design_top_wrapper (
     wire[3:0]   S_hdmi_debug_status;
     wire        S_lane_error_any;
 
-    
+    wire [23:0] S_proc_rgb_out;    //多路选择器输出→送hdmi_mixer
     wire [23:0] S_video_bright;    // 亮度增强后的像素（所有算法共用）
-    
+    wire [1:0] S_mode_sel;         // 拨码开关模式选择（2位！）
+
 
     //===== 新增图像处理信号（S_hdmi_pixel_clk域）=====
     wire [7:0]  S_gray_out;        //RGB转灰度输出
     wire [23:0] S_rgb_gray;        //灰度扩展为24bit
     wire [23:0] S_rgb_bin;         //二值化输出
     wire [23:0] S_rgb_sobel;       //Sobel边缘输出
-    wire [23:0] S_proc_rgb_out;    //多路选择器输出→送hdmi_mixer
-    wire [1:0] S_mode_sel;         // 拨码开关模式选择（2位！）
+    wire [23:0] S_video_sat;       // 饱和度增强后的像素（仅彩色原图模式使用）
+    wire [23:0] S_video_dn;        // 色度降噪后的像素（仅彩色原图模式使用）
 
 
     // ===== 拨码开关模式选择 =====
@@ -459,13 +460,51 @@ module design_top_wrapper (
     //   输出信号名沿用 S_video_bright，灰度/二值化/Sobel/mux 均无需改动
     gamma_lut #(
         .EN_GAMMA (1     ),   // 1:启用Gamma校正；改 0 可上板做 A/B 对比
-        .EN_BLC   (1     ),   // 1:扣除黑电平；改 0 关闭
-        .BL_LEVEL (8'd16 )    // 8bit域黑电平(=RAW10域64>>2)；画面发灰→调大，暗部出亮噪点→调小
+        .EN_BLC   (0     ),   // ★ v5 起改为 0：黑电平已前移至 raw10_unpacket，
+                              //   此处若再扣会造成重复扣除（暗部被切零）
+        .BL_LEVEL (8'd16 )    // EN_BLC=0 时本参数不起作用；需要回退时把上面改回 1 即可
     ) u_gamma_lut(
         .clk    (S_hdmi_pixel_clk),
         .rst_n  (S_hdmi_rst_n),
         .rgb_in (S_video_rd_data),
         .rgb_out(S_video_bright)
+    );
+
+    //0.6 色度降噪（Gamma 之后、饱和度之前）
+    //    目的：消除高增益（63x）带来的**彩色噪点**
+    //    原理：转 YCbCr 后只对色度 Cb/Cr 做 3×3 可分离低通，亮度 Y 完全不动
+    //          → 噪点被平滑，但边缘/纹理不会糊（人眼对色度分辨率本就低）
+    //    资源：2 个行延时 BRAM；流水线设计（单级≤4 级逻辑），时序宽松
+    //    延时：垂直上移 1 行 + 水平右移 1 像素，肉眼不可察；仅作用于彩色通路
+    chroma_denoise #(
+        .IMG_WIDTH (1280  ),   // 必须与视频时序的行像素数一致，否则行缓存会错位
+        .ADDR_W    (12    ),
+        .NR_MODE   (2     ),   // 2:完整3×3；1:仅水平（不占BRAM）；0:旁路
+        .NR_EN     (1     )    // 1:启用；0:直通（A/B 对比用）
+    ) u_chroma_denoise(
+        .clk    (S_hdmi_pixel_clk),
+        .rst_n  (S_hdmi_rst_n),
+        .I_de   (S_hdmi_de),        // 必须与 rgb_in 同一拍对齐
+        .rgb_in (S_video_bright),
+        .rgb_out(S_video_dn)
+    );
+
+    //0.5 饱和度增强（Gamma 之后、MUX 之前，仅作用于彩色原图通路）
+    //    目的：解决"颜色发闷/色彩浓度不足"（无 CCM、无饱和度处理导致）
+    //    原理：保持亮度 Y 不变，只把色度分量 (C-Y) 放大 SAT_GAIN 倍
+    //    注意：灰度/二值/Sobel 分支数据 R=G=B，经本模块输出恒等于输入，
+    //          故本模块只接 MUX 的 rgb0，其余分支仍从 S_video_bright 取，不受影响
+    //    延迟：2 拍（v2 两级流水版，修复 v1 在此处造成的 -1.7ns 时序违例）
+    //          仅彩色原图模式受影响，表现为画面右移 1 像素，模式互斥显示不可见
+    sat_enhance #(
+        .EN       (1     ),   // 1:启用饱和度增强；改 0 可上板做 A/B 对比
+        .SAT_GAIN (9'd96 ),   // 色度增益，6位小数定点：64=1.0x 96=1.5x 112=1.75x 128=2.0x
+        .DEADZONE (5'd3  )    // 色度死区：|C-Y|≤该值视为灰色不增强（抑制彩色噪点），0=关闭
+    ) u_sat_enhance(
+        .clk    (S_hdmi_pixel_clk),
+        .rst_n  (S_hdmi_rst_n),
+        .rgb_in (S_video_dn),      // 色度降噪之后（原为 S_video_bright）
+        .rgb_out(S_video_sat)
     );
 
     //1. RGB转灰度
@@ -510,7 +549,7 @@ module design_top_wrapper (
         .clk     (S_hdmi_pixel_clk),
         .rst_n   (S_hdmi_rst_n),
         .mode    (S_mode_sel),
-        .rgb0    (S_video_bright),
+        .rgb0    (S_video_sat),       // 彩色原图：经饱和度增强（其余分支不受影响）
         .rgb1    (S_rgb_gray),
         .rgb2    (S_rgb_bin),
         .rgb3    (S_rgb_sobel),
@@ -662,7 +701,14 @@ raw10_unpacket_2lane u_raw10_unpacket (
 .O_raw10_frame_start(S_raw10_frame_start),
 .O_raw10_frame_end  (S_raw10_frame_end),
 .O_raw10_valid      (S_raw10_valid),
-.O_raw10_data       (S_raw10_data)
+.O_raw10_data       (S_raw10_data),
+
+//黑电平扣除前移至此（v5 修复）：标准的 ISP 顺序应为 BLC → Demosaic → AWB。
+//原先黑电平是在链路末端的 gamma_lut 里扣的，导致 AWB 统计到带 pedestal 的数据，
+//白平衡被拉歪 —— 这就是画面"偏紫 + 雾感"的根因。
+//此处在 RAW10 域扣 64，相当于 8bit 域的 16；同时必须把 gamma_lut 的 EN_BLC 关掉，
+//否则会被扣两次，暗部直接切零。
+.I_camera_black_level(10'd64)
   );
 
 
