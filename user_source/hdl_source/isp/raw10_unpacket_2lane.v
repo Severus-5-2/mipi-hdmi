@@ -26,8 +26,8 @@
 *7) _r delay or register
 *8) _s state mechine
 *********************************************************************/
-/*********raw10_unpacket_2lane RAW���ݸ�ʽתΪRAW10,֮������λ��ʵ��RAW8***********
---�汾��1.0
+/*********raw10_unpacket_2lane RAW���ݸ�ʽתΪRAW10,֮������λ��ʵ��RAW8***********
+--�汾��1.0
 *********************************************************************/
 
 module raw10_unpacket_2lane (
@@ -62,7 +62,7 @@ module raw10_unpacket_2lane (
   wire [39:0] S_fifo_rd_data;  //synthesis keep
 
 
-  //ͬ��������MIPI���������I_csi_valid����������ÿ��I_csi_valid ����1��
+  //ͬ��������MIPI���������I_csi_valid����������ÿ��I_csi_valid ����1��
   always @(posedge I_clk) begin
     O_raw10_frame_start <= I_csi_frame_start;
     O_raw10_frame_end   <= I_csi_frame_end;
@@ -75,8 +75,8 @@ module raw10_unpacket_2lane (
   end
 
   always @(posedge I_clk) begin
-    if({S_csi_valid_2d,S_csi_valid_1d,I_csi_valid}==3'b101)begin//��S_csi_valid_2d��I_csi_validͬʱ��Ч��S_csi_valid_2d����ǰһ����Ч32Bit I_csi_valid���������µ�32bit
-      if (S_cnt == 3'd4)  //һ�����ڽ���
+    if({S_csi_valid_2d,S_csi_valid_1d,I_csi_valid}==3'b101)begin//��S_csi_valid_2d��I_csi_validͬʱ��Ч��S_csi_valid_2d����ǰһ����Ч32Bit I_csi_valid���������µ�32bit
+      if (S_cnt == 3'd4)  //һ�����ڽ���
         S_cnt <= 3'd0;
       else S_cnt <= S_cnt + 3'd1;
     end else if ({S_csi_valid_2d, S_csi_valid_1d, I_csi_valid} == 3'b000) S_cnt <= 3'd0;
@@ -131,9 +131,43 @@ module raw10_unpacket_2lane (
     end
   end
 
+  //=========================================================================
+  //  黑电平扣除（BLC）  —— v6 修复（2026-10-06）
+  //-------------------------------------------------------------------------
+  //  【为什么加这一段】
+  //    本模块的端口 I_camera_black_level 一直有声明，但活跃代码里从未使用：
+  //    真正做减法的 4 行语句被关在下面第 141~233 行的 /* ... */ 注释块里。
+  //    与此同时链路末端 gamma_lut 的 EN_BLC 又因为"黑电平已前移到 RAW 域"
+  //    被设成了 0 —— 于是**整条链路一次黑电平都没有扣**。
+  //
+  //    后果：SC520CS 的 RAW10 自带 pedestal（10bit 域 64，即 8bit 域 16），
+  //    一路带进 Gamma。Gamma 对暗端是强放大（LUT[16]=72、LUT[32]=99），
+  //    最黑的地方被抬到 70 多灰 —— 这就是长期存在的"雾感 / 发灰 / 对比度低"。
+  //    它还连累了 AE：帧均值 Y_avg 里混着这块抬升量，AE 误以为画面够亮而不加
+  //    曝光，表现为"AE 效果不明显、要手动按很多次才好看、画面偏暗"。
+  //
+  //  【必须限幅（关键）】
+  //    10bit 无符号减法在 raw < BL 时会下溢：63 - 64 = 1023，>>2 后 = 255，
+  //    暗部直接变成刺眼白点，比不扣还糟。所以这里先比较再减，小于 BL 一律给 0。
+  //
+  //  【位宽与下游取位】
+  //    本模块输出 10bit RAW；下游 demosaic 取 [9:2]（即 >>2）转成 8bit。
+  //    因此在 10bit 域扣 64，等效 8bit 域扣 16，扣完黑位 = 0。
+  //    逻辑量：比较器 + 减法器 + 2 选 1，约 2~3 级，同一时钟域内寄存，时序安全。
+  //=========================================================================
+  wire [9:0] s_blc_p0_raw = S_raw10_wr_data[ 9: 0];
+  wire [9:0] s_blc_p1_raw = S_raw10_wr_data[19:10];
+  wire [9:0] s_blc_p2_raw = S_raw10_wr_data[29:20];
+  wire [9:0] s_blc_p3_raw = S_raw10_wr_data[39:30];
+
+  wire [9:0] s_blc_p0 = (s_blc_p0_raw > I_camera_black_level) ? (s_blc_p0_raw - I_camera_black_level) : 10'd0;
+  wire [9:0] s_blc_p1 = (s_blc_p1_raw > I_camera_black_level) ? (s_blc_p1_raw - I_camera_black_level) : 10'd0;
+  wire [9:0] s_blc_p2 = (s_blc_p2_raw > I_camera_black_level) ? (s_blc_p2_raw - I_camera_black_level) : 10'd0;
+  wire [9:0] s_blc_p3 = (s_blc_p3_raw > I_camera_black_level) ? (s_blc_p3_raw - I_camera_black_level) : 10'd0;
+
   always @(posedge I_clk) begin
     O_raw10_data <= {
-      S_raw10_wr_data[9:0], S_raw10_wr_data[19:10], S_raw10_wr_data[29:20], S_raw10_wr_data[39:30]
+      s_blc_p0, s_blc_p1, s_blc_p2, s_blc_p3
     };
     O_raw10_valid <= S_raw10_wr_en;
   end

@@ -1,0 +1,15 @@
+# 安路官方加密 IP（IEEE 1735 保护）：按二进制处理
+#   禁止任何行尾转换与文本过滤。一旦被转换成 LF 或改动 BASE64 行结构，
+#   综合时会报解密失败，且错误信息极难定位。
+*.enc.v   binary
+*.vp      binary
+
+# 源码统一以 LF 入库
+#   工作副本会按本机 core.autocrlf 设置检出，不影响本地编译。
+*.v       text eol=lf
+*.sv      text eol=lf
+*.sdc     text eol=lf
+*.adc     text eol=lf
+*.py      text eol=lf
+*.md      text eol=lf
+*.gitignore text eol=lf

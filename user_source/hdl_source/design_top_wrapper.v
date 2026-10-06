@@ -9,7 +9,7 @@ module design_top_wrapper (
     output wire       O_cam_24m,
     output wire       O_cam_rst,
       
-    inout wire [1:0]  I_button,
+    inout wire [1:0]  I_button,    // 板载轻触按键，低有效：[0]=KEY1(D5)=减，[1]=KEY2(A9)=增
     input             I_sw1,   // 拨码开关SW1（A4），拨上=0，拨下=1（实测确认）
     input             I_sw2,   // 拨码开关SW2（B4），拨上=0，拨下=1（实测确认）
 
@@ -217,6 +217,10 @@ module design_top_wrapper (
     wire [23:0] S_rgb_sobel;       //Sobel边缘输出
     wire [23:0] S_video_sat;       // 饱和度增强后的像素（仅彩色原图模式使用）
     wire [23:0] S_video_dn;        // 色度降噪后的像素（仅彩色原图模式使用）
+
+    //===== 自动曝光 AE 测光信号 =====
+    wire [7:0]  S_ae_y_avg;        // 帧平均亮度（74.25MHz 域，更新后保持整帧）
+    wire        S_ae_frame_tog;    // 帧握手电平，每帧翻转（跨时钟域用）
 
 
     // ===== 拨码开关模式选择 =====
@@ -507,6 +511,24 @@ module design_top_wrapper (
         .rgb_out(S_video_sat)
     );
 
+    //0.7 自动曝光测光器（AE 闭环的第①步）
+    //    统计 Gamma 之后、MUX 之前的整帧平均亮度，送给 24MHz 域的 ae_set 做控制律。
+    //    注意这里统计的是【最终显示画面的亮度】，与肉眼所见一致，
+    //    因此靶亮度 TARGET 可以用直觉友好的 112（中灰偏亮）。
+    //    本模块只是"旁路取样"，不改动任何像素数据，对显示通路零影响。
+    ae_meter #(
+        .IMG_WIDTH  (1280  ),      // 必须与视频时序一致
+        .IMG_HEIGHT (720   ),
+        .PIPE_DELAY (1     )       // S_video_bright 比 S_hdmi_de 晚 1 拍（gamma_lut 输出寄存）
+    ) u_ae_meter(
+        .clk            (S_hdmi_pixel_clk),
+        .rst_n          (S_hdmi_rst_n),
+        .I_de           (S_hdmi_de),
+        .I_rgb          (S_video_bright),
+        .O_Y_avg        (S_ae_y_avg),
+        .O_frame_toggle (S_ae_frame_tog)
+    );
+
     //1. RGB转灰度
 
 
@@ -597,12 +619,18 @@ module design_top_wrapper (
 	
 
   
-  ae_set u_ae_set (
+  ae_set #(
+      .AUTO_EN    (1      ),   // 1:自动曝光使能；0:关闭自动（按键恢复直接调增益）
+      .TARGET_DEF (8'd120 ),   // 上电靶亮度（v6：112→120，配合 BLC 修复一起上调）
+      .WAIT_FRAMES(4'd3   )    // 两次调整间隔帧数（手册要求曝光 N+2 帧生效）
+  ) u_ae_set (
       .I_clk(S_24m_clk),
       .I_rst(~S_rst_n),
       .I_btn({I_button,2'b11}),
       .I_cam_cfg_done(S_cam_cfg_done),
       .I_ae_cfg_done(S_ae_cfg_done),
+      .I_Y_avg       (S_ae_y_avg),      // 来自 ae_meter（异步于本时钟域，内部已做同步）
+      .I_frame_toggle(S_ae_frame_tog),
       .O_ae_req(S_ae_req),
       .O_ae(S_ae),
       .O_ag(S_ag)
