@@ -621,7 +621,10 @@ module design_top_wrapper (
   
   ae_set #(
       .AUTO_EN    (1      ),   // 1:自动曝光使能；0:关闭自动（按键恢复直接调增益）
-      .TARGET_DEF (8'd120 ),   // 上电靶亮度（v6：112→120，配合 BLC 修复一起上调）
+      .TARGET_DEF (8'd145 ),   // ★v6.4：靶亮度 120→145（120 对应显示域偏暗，用户反馈"和手机差距大"）
+                               //   ⚠【易错点】此处显式传参会【覆盖】ae_set 模块内 TARGET_DEF 的默认值，
+                               //     改靶亮度时两处必须同步；v6.3 只改了模块默认值(145)而此处仍传 120，
+                               //     导致"A 项 120→145"整轮失效 —— 排查画质问题先看这里。
       .WAIT_FRAMES(4'd3   )    // 两次调整间隔帧数（手册要求曝光 N+2 帧生效）
   ) u_ae_set (
       .I_clk(S_24m_clk),
@@ -949,7 +952,11 @@ isp_top u_isp_top (
         .V_OFFSET   ( 0    ),
         .IMG_WIDTH  ( 1280 ),
         .IMG_HEIGHT ( 720  ),
-        .DEBUG_MODE ( 0    )
+        .DEBUG_MODE ( 0    ),
+        // ★2026-10-08 中文 OSD：常驻显示「帧数 / AE 增益 / 当前模式」。
+        //   比赛硬性要求：切换模式必须在屏幕上显示当前模式名。
+        //   若只想留安路 Logo、不叠加任何信息，改 1'b0 即可。
+        .OSD_INFO_EN( 1'b1 )
     )u_hdmi_mixer(
         .I_clk           ( S_hdmi_pixel_clk   ),
         .I_rst_n         ( S_hdmi_rst_n       ),
@@ -959,6 +966,11 @@ isp_top u_isp_top (
         .I_video_user    ( S_hdmi_user        ),
         .I_video_last    ( S_hdmi_last        ),
         .I_debug_status  ( S_hdmi_debug_status),
+        // ★当前显示模式（拨码 SW1/SW2）。S_mode_sel 已在像素时钟域两级同步，
+        //   与 hdmi_mixer 同域，直接连线即可，无需再加同步器。
+        .I_mode          ( S_mode_sel         ),
+        .I_ae_y          ( S_ae_y_avg         ),   // 预留：帧平均亮度（当前不显示）
+        .I_ae_ag         ( S_ag               ),   // AE 增益控制字（OSD 第 2 行）
         .O_video_rd_en   ( S_hdmi_window_rd_en),
         .I_video_rd_data ( S_proc_rgb_out  ),
         .O_hdmi_vsync    ( S_hdmi_out_vsync   ),
