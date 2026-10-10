@@ -218,6 +218,24 @@ module design_top_wrapper (
     wire [23:0] S_video_sat;       // 饱和度增强后的像素（仅彩色原图模式使用）
     wire [23:0] S_video_dn;        // 色度降噪后的像素（仅彩色原图模式使用）
 
+    //===== 张铭晨 track_box：像素坐标 + 画框 + 坐标 OSD（D1）=====
+    wire [10:0] S_pix_x, S_pix_x_1d, S_pix_x_2d;
+    wire [9:0]  S_pix_y, S_pix_y_1d, S_pix_y_2d;
+    wire        S_frame_done;      // 每帧结束脉冲（消隐期计算用）
+    wire        S_box_hit;         // 画框 / 十字准星命中
+    wire [23:0] S_box_color;
+    wire        S_coord_hit;       // 坐标 OSD 命中
+    wire [23:0] S_coord_color;
+
+    //===== 叠加仲裁（张铭晨 + 张金艺 共用一条进入 hdmi_mixer 的通道）=====
+    //  优先级（高→低）：坐标数字 OSD > 画框/准星 > 检测掩膜
+    //  ★合并张金艺代码时：只把 S_mask_hit / S_mask_color 的驱动源换成 detect 模块输出，
+    //    不要另开 hdmi_mixer 端口 —— 两人改同一个文件必然冲突。
+    wire        S_mask_hit;        // 预留：目标检测掩膜/伪彩（张金艺 D1）
+    wire [23:0] S_mask_color;      // 预留：掩膜颜色
+    wire        S_ovl_hit;         // 仲裁结果 → hdmi_mixer.I_ext_hit
+    wire [23:0] S_ovl_color;       // 仲裁结果 → hdmi_mixer.I_ext_color
+
     //===== 自动曝光 AE 测光信号 =====
     wire [7:0]  S_ae_y_avg;        // 帧平均亮度（74.25MHz 域，更新后保持整帧）
     wire        S_ae_frame_tog;    // 帧握手电平，每帧翻转（跨时钟域用）
@@ -947,6 +965,118 @@ isp_top u_isp_top (
         .O_vtc_last    ( S_hdmi_last      )
     );
 
+    //==================================================================
+    // ★张铭晨 track_box —— D1 交付：画框 + 坐标 OSD（SELF_TEST 固定框）
+    //   目的：上板验证「坐标系统 + 画框对齐」是否正确。
+    //   SELF_TEST=1 ⇒ 画 4 个写死坐标的框 + 白色十字准星（准星在屏心 640,360），
+    //   与左下角 OSD 读数 X:0640 / Y:0360 互相印证。
+    //   D4 起接入张金艺的目标列表：SELF_TEST 改 0，总线接真实检测结果即可。
+    //   注：本段仅在 workbuddy 分支集成，未改动任何原有逻辑。
+    //==================================================================
+    pix_coord_gen #(
+        .H_ACTIVE ( 1280 ),
+        .V_ACTIVE ( 720  )
+    )u_pix_coord_gen(
+        .I_clk        ( S_hdmi_pixel_clk ),
+        .I_rst_n      ( S_hdmi_rst_n     ),
+        .I_de         ( S_hdmi_de        ),
+        .I_last       ( S_hdmi_last      ),
+        .I_vsync      ( S_hdmi_vsync     ),
+        .O_pix_x      ( S_pix_x          ),
+        .O_pix_y      ( S_pix_y          ),
+        .O_pix_x_1d   ( S_pix_x_1d       ),
+        .O_pix_x_2d   ( S_pix_x_2d       ),
+        .O_pix_y_1d   ( S_pix_y_1d       ),
+        .O_pix_y_2d   ( S_pix_y_2d       ),
+        .O_frame_done ( S_frame_done     )
+    );
+
+    box_draw #(
+        .SELF_TEST ( 1 )
+    )u_box_draw(
+        .I_clk       ( S_hdmi_pixel_clk ),
+        .I_rst_n     ( S_hdmi_rst_n     ),
+        .I_de        ( S_hdmi_de        ),
+        .I_pix_x     ( S_pix_x          ),
+        .I_pix_y     ( S_pix_y          ),
+        .I_box_valid ( 4'b0000          ),   // SELF_TEST=1 时被常量折叠
+        .I_box_xmin  ( 44'd0            ),
+        .I_box_xmax  ( 44'd0            ),
+        .I_box_ymin  ( 40'd0            ),
+        .I_box_ymax  ( 40'd0            ),
+        .I_cross_en  ( 1'b1             ),
+        .I_cross_x   ( 11'd640          ),
+        .I_cross_y   ( 10'd360          ),
+        .O_hit       ( S_box_hit        ),
+        .O_color     ( S_box_color      ),
+        .O_de        (                  )
+    );
+
+    osd_coord u_osd_coord(
+        .I_clk        ( S_hdmi_pixel_clk ),
+        .I_rst_n      ( S_hdmi_rst_n     ),
+        .I_de         ( S_hdmi_de        ),
+        .I_pix_x      ( S_pix_x          ),
+        .I_pix_y      ( S_pix_y          ),
+        .I_x_val      ( 11'd640          ),   // D1 固定显示标定点
+        .I_y_val      ( 10'd360          ),
+        .I_frame_done ( S_frame_done     ),
+        .O_hit        ( S_coord_hit      ),
+        .O_color      ( S_coord_color    )
+    );
+
+    // ===== 叠加仲裁：坐标数字 > 画框 > 检测掩膜 =====
+    // ★2026-10-10 合并：S_mask_hit / S_mask_color 已接到 detect_color_mask 输出（见下方例化）。
+    // ★连续赋值必须写在模块体内、且在任何模块例化的端口连接列表之外。
+
+    //==================================================================
+    // ★张金艺 detect_zjy —— D1 交付：YCbCr 双阈值颜色掩膜
+    //   取数点：S_video_sat（与 S_hdmi_de 同源，PIPE_DELAY=0）
+    //   坐标  ：接 S_pix_x_2d / S_pix_y_2d（由 u_pix_coord_gen 生成）→ PIX_DLY=2
+    //   输出  ：O_mask → S_mask_hit；颜色固定绿（可改 S_mask_color）
+    //   注：`I_color_sel` 暂用常量（2'd0 = 红）。后续可由拨码 SW 驱动。
+    //==================================================================
+    wire        S_det_mask_r, S_det_mask_g, S_det_mask_b;
+
+    detect_color_mask #(
+        .IMG_WIDTH  ( 1280 ),
+        .IMG_HEIGHT ( 720  ),
+        .PIPE_DELAY ( 0    ),   // S_video_sat 与 S_hdmi_de 同拍
+        .PIX_DLY    ( 2    )    // 接 S_pix_x_2d / S_pix_y_2d
+    )u_detect_color_mask(
+        .clk        ( S_hdmi_pixel_clk ),
+        .rst_n      ( S_hdmi_rst_n     ),
+        .I_de       ( S_hdmi_de        ),
+        .I_vsync    ( S_hdmi_vsync     ),
+        .I_hsync    ( S_hdmi_hsync     ),
+        .I_user     ( S_hdmi_user      ),
+        .I_last     ( S_hdmi_last      ),
+        .I_rgb      ( S_video_sat      ),
+        .I_pix_x    ( S_pix_x_2d       ),
+        .I_pix_y    ( S_pix_y_2d       ),
+        .I_color_sel( 2'd0             ),   // 0=红 1=蓝 2=绿 3=全部
+        .O_mask     ( S_mask_hit       ),
+        .O_mask_r   ( S_det_mask_r     ),
+        .O_mask_g   ( S_det_mask_g     ),
+        .O_mask_b   ( S_det_mask_b     ),
+        .O_y        (                  ),
+        .O_cb       (                  ),
+        .O_cr       (                  ),
+        .O_de       (                  ),
+        .O_vsync    (                  ),
+        .O_hsync    (                  ),
+        .O_user     (                  ),
+        .O_last     (                  ),
+        .O_pix_x    (                  ),
+        .O_pix_y    (                  ),
+        .O_frame_done(                 )
+    );
+
+    assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
+    assign S_ovl_hit    = S_mask_hit | S_box_hit | S_coord_hit;
+    assign S_ovl_color  = S_coord_hit ? S_coord_color :
+                          (S_box_hit  ? S_box_color  : S_mask_color);
+
     hdmi_mixer #(
         .H_OFFSET   ( 0    ),
         .V_OFFSET   ( 0    ),
@@ -971,6 +1101,9 @@ isp_top u_isp_top (
         .I_mode          ( S_mode_sel         ),
         .I_ae_y          ( S_ae_y_avg         ),   // 预留：帧平均亮度（当前不显示）
         .I_ae_ag         ( S_ag               ),   // AE 增益控制字（OSD 第 2 行）
+        // ★叠加仲裁输出（画框 / 准星 / 坐标 OSD / 检测掩膜），优先级低于 Logo 与文字 OSD
+        .I_ext_hit       ( S_ovl_hit          ),
+        .I_ext_color     ( S_ovl_color        ),
         .O_video_rd_en   ( S_hdmi_window_rd_en),
         .I_video_rd_data ( S_proc_rgb_out  ),
         .O_hdmi_vsync    ( S_hdmi_out_vsync   ),

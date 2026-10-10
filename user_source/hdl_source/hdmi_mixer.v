@@ -79,6 +79,10 @@ module hdmi_mixer #(
     input  wire [7:0]  I_ae_y,
     input  wire [15:0] I_ae_ag,
 
+    // ★张铭晨 track_box：外部叠加（画框 + 坐标 OSD），最低优先级
+    input  wire        I_ext_hit,
+    input  wire [23:0] I_ext_color,
+
     output wire        O_video_rd_en,
     input  wire [23:0] I_video_rd_data,
 
@@ -517,6 +521,15 @@ module hdmi_mixer #(
             else if(S_pf_hit_r && S_pf_row_bits[~S_x_2d[3:0]]) begin
                 S_osd_hit   = 1'b1;
                 S_osd_color = COLOR_DYN_TEXT;
+            end
+
+            //------------------ 17.3 外部叠加：画框 / 坐标 OSD（张铭晨）----------
+            //   放在最后 ⇒ 优先级最低，Logo 与文字 OSD 仍在最上层。
+            //   box_draw / osd_coord 内部均为「坐标延 2 拍 + de 延 2 拍」，
+            //   与本模块的 S_x_2d / S_video_de_2d 同舞台 ⇒ 像素级对齐。
+            else if(I_ext_hit) begin
+                S_osd_hit   = 1'b1;
+                S_osd_color = I_ext_color;
             end
         end
     end
