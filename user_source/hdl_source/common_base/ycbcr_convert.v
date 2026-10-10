@@ -56,7 +56,8 @@ module ycbcr_convert #(
     input  wire                  I_hsync,
     input  wire [23:0]           I_rgb,        // {R[7:0], G[7:0], B[7:0]}
 
-    // ---- 像素坐标（来自公共 pix_counter，可选；不需要时接 0）----
+    // ---- 像素坐标（来自 pix_coord_gen，可选；不需要时接 0）----
+    //   注：坐标源全队统一用 track_box/rtl/pix_coord_gen.v（原 common_base/pix_counter.v 已删除）
     input  wire [`PIX_X_W-1:0]   I_pix_x,
     input  wire [`PIX_Y_W-1:0]   I_pix_y,
 

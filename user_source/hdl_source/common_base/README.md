@@ -16,7 +16,6 @@
 common_base/
 ├── README.md              本文件
 ├── common_defs.vh         全局常量、位宽、接口位域（★ 接口宪法）
-├── pix_counter.v          ⚠️ 已作废（见下）——坐标源改用张铭晨的 track_box/pix_coord_gen.v
 ├── ycbcr_convert.v        RGB888 → YCbCr（§1.1，位级复用 chroma_denoise）
 ├── target_bus.v           目标列表总线打包/解包（§4：艺 → 晨）
 ├── conn_label.v           [待建] 游程法连通域（D2，张金艺主导）
@@ -27,7 +26,7 @@ common_base/
 > ⚠️ **2026-10-10 修订（对账后）**：坐标计数器**不放在本目录**。
 > 全队统一使用**张铭晨的 `user_source/hdl_source/track_box/rtl/pix_coord_gen.v`**
 > （场消隐期归零，已修掉首行偏移；自带 `_1d`/`_2d` 延时输出）。
-> 本目录 `pix_counter.v` **作废**，参见 `doc/接口对齐结论-2026-10-10.md`。
+> 本目录原 `pix_counter.v` **已删除**，参见 `doc/接口对齐结论-2026-10-10.md`。
 >
 > 保留原则：**本目录只保留「张铭晨未实现的」+「双方共享的接口约定」**，
 > 避免同一功能出现两份实现（分叉 = 合板出错）。
@@ -79,11 +78,16 @@ target_pack u_pack (...);
 TD / iverilog 按依赖自动解析。命令行仿真（iverilog）建议：
 
 ```bash
-iverilog -I user_source/hdl_source/common_base \
+iverilog -g2005 -I user_source/hdl_source/common_base \
+         -y user_source/hdl_source -y user_source/hdl_source/detect_zjy \
          -o sim.out tb_xxx.v xxx.v \
-         user_source/hdl_source/common_base/pix_counter.v \
-         user_source/hdl_source/common_base/ycbcr_convert.v
+         user_source/hdl_source/common_base/ycbcr_convert.v \
+         user_source/hdl_source/common_base/target_bus.v
 ```
+
+> 注：坐标计数器**不在本目录**，编译时无需加入（见上方 2026-10-10 修订说明）。
+> 若被测模块用到坐标，请使用张铭晨的 `track_box/rtl/pix_coord_gen.v`。
+> `-y <目录>` 是库搜索路径，让 iverilog 自动按模块名找源文件（可多写几个）。
 
 ---
 
@@ -92,7 +96,8 @@ iverilog -I user_source/hdl_source/common_base \
 | 日期 | 修改人 | 内容 | 双方确认 |
 |:---|:---|:---|:---|
 | 2026-10-10 | 张金艺 | 首版建立：`common_defs.vh` / `pix_counter.v` / `ycbcr_convert.v` / `target_bus.v` | 待确认 |
-| 2026-10-10 | 张金艺 | 对账后修订：坐标源改用张铭晨 `pix_coord_gen.v`，`pix_counter.v` 作废；明确「保留但避重」原则 | 待确认 |
+| 2026-10-10 | 张金艺 | 对账后修订：坐标源改用张铭晨 `pix_coord_gen.v`，`pix_counter.v` 删除；明确「保留但避重」原则 | 待确认 |
+| 2026-10-10 | 张金艺 | 第二轮对账核实：清理 README 编译命令等 3 处 `pix_counter` 残留；同步清 `协作规范-代码一致性.md` 4 处 | 待确认 |
 
 ---
 
