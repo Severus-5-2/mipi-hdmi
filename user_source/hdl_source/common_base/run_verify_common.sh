@@ -3,7 +3,7 @@
 #  run_verify_common.sh  —  common_base 公共模块一键验证
 #=============================================================================
 #  做两件事：
-#    ① 语法编译：pix_counter / ycbcr_convert / target_bus
+#    ① 语法编译：ycbcr_convert / target_bus
 #    ② 等价性对拍：ycbcr_convert 必须与 detect_zjy/detect_color_mask 逐位一致
 #
 #  用法（在 common_base 目录下）：
@@ -35,12 +35,12 @@ echo "==================================================="
 echo ""
 echo "[1/2] 语法编译 ..."
 "$IVERILOG" -I . -o "$OUT_COMPILE" -tnull \
-    pix_counter.v ycbcr_convert.v target_bus.v 2>&1
+    ycbcr_convert.v target_bus.v 2>&1
 if [ $? -ne 0 ]; then
     echo "  ❌ 编译失败"
     exit 1
 fi
-echo "  ✅ 编译通过（pix_counter / ycbcr_convert / target_bus）"
+echo "  ✅ 编译通过（ycbcr_convert / target_bus）"
 
 # -------- ② 等价性对拍 --------
 echo ""
@@ -51,7 +51,7 @@ if [ ! -f "$DETECT_DIR/detect_color_mask.v" ]; then
 fi
 
 "$IVERILOG" -I . -I "$DETECT_DIR" -o "$OUT_EQUIV" \
-    tb_ycbcr_equiv.v pix_counter.v ycbcr_convert.v \
+    tb_ycbcr_equiv.v ycbcr_convert.v \
     "$DETECT_DIR/detect_color_mask.v" 2>&1
 if [ $? -ne 0 ]; then
     echo "  ❌ 编译失败"

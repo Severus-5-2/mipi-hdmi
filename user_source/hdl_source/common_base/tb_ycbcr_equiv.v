@@ -59,16 +59,55 @@ module tb_ycbcr_equiv;
     integer fout;
     integer fail_cnt;
 
-    // 公共坐标计数器（模拟顶层 pix_counter）
-    wire [`PIX_X_W-1:0] cc_px;
-    wire [`PIX_Y_W-1:0] cc_py;
-    wire cc_fd;
+    // 公共坐标延时链（模拟顶层 pix_coord_gen 的 _2d 输出）
+    //   ★ 2026-10-10 改造：pix_counter 已删除，TB 自行产生坐标并延时 2 拍，
+    //     喂给 ycbcr_convert (PIX_DLY=0) 与 detect_color_mask (PIX_DLY=2)。
+    reg  [`PIX_X_W-1:0] cc_px;
+    reg  [`PIX_Y_W-1:0] cc_py;
+    reg  [`PIX_X_W-1:0] cc_px_1d, cc_px_2d;
+    reg  [`PIX_Y_W-1:0] cc_py_1d, cc_py_2d;
+    reg                 cc_fd;
 
-    pix_counter #(.IMG_WIDTH(PW), .IMG_HEIGHT(PH)) u_cnt (
-        .clk(clk), .rst_n(rst_n),
-        .I_de(v_de), .I_user(v_user), .I_last(v_last), .I_vsync(v_vsync),
-        .O_pix_x(cc_px), .O_pix_y(cc_py), .O_frame_done(cc_fd)
-    );
+    // TB 自己按「场消隐期归零」生成坐标（与 pix_coord_gen.v 同规则）
+    reg [`PIX_X_W-1:0] tb_x;
+    reg [`PIX_Y_W-1:0] tb_y;
+    reg                tb_vsync_1d;
+    wire               tb_vsync_rise = v_vsync & (~tb_vsync_1d);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) tb_vsync_1d <= 1'b0;
+        else        tb_vsync_1d <= v_vsync;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            tb_x <= 0; tb_y <= 0;
+        end else if (tb_vsync_rise) begin
+            tb_x <= 0; tb_y <= 0;
+        end else if (v_de) begin
+            if (v_last) begin
+                tb_x <= 0;
+                tb_y <= (tb_y == PH-1) ? 0 : tb_y + 1'b1;
+            end else begin
+                tb_x <= (tb_x == PW-1) ? 0 : tb_x + 1'b1;
+            end
+        end
+    end
+
+    // cc_* = 当前拍（0 延时）；cc_*_2d = 延时 2 拍
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cc_px <= 0; cc_py <= 0;
+            cc_px_1d <= 0; cc_px_2d <= 0;
+            cc_py_1d <= 0; cc_py_2d <= 0;
+            cc_fd <= 1'b0;
+        end else begin
+            cc_px <= tb_x;  cc_py <= tb_y;
+            cc_px_1d <= cc_px;  cc_px_2d <= cc_px_1d;
+            cc_py_1d <= cc_py;  cc_py_2d <= cc_py_1d;
+            cc_fd <= tb_vsync_rise;
+        end
+    end
 
     //------------------------------------------------------------------
     // DUT-A：common_base/ycbcr_convert.v
@@ -86,7 +125,6 @@ module tb_ycbcr_equiv;
         .O_de(a_de), .O_vsync(), .O_hsync(),
         .O_pix_x(a_px), .O_pix_y(a_py)
     );
-
     //------------------------------------------------------------------
     // DUT-B：detect_zjy/detect_color_mask.v（D1 参考实现，取其 YCbCr 输出）
     //------------------------------------------------------------------
@@ -96,12 +134,14 @@ module tb_ycbcr_equiv;
     wire [`PIX_Y_W-1:0] b_py;
 
     detect_color_mask #(
-        .IMG_WIDTH(PW), .IMG_HEIGHT(PH), .PIPE_DELAY(0), .Y_MIN(8'd0)
+        .IMG_WIDTH(PW), .IMG_HEIGHT(PH), .PIPE_DELAY(0), .PIX_DLY(0), .Y_MIN(8'd0)
     ) u_b (
         .clk(clk), .rst_n(rst_n),
         .I_de(v_de), .I_vsync(v_vsync), .I_hsync(1'b0),
         .I_user(v_user), .I_last(v_last),
-        .I_rgb(v_rgb), .I_color_sel(`COLOR_SEL_OR),
+        .I_rgb(v_rgb),
+        .I_pix_x(cc_px), .I_pix_y(cc_py),
+        .I_color_sel(`COLOR_SEL_OR),
         .O_mask(), .O_mask_r(), .O_mask_g(), .O_mask_b(),
         .O_y(b_y), .O_cb(b_cb), .O_cr(b_cr),
         .O_de(b_de), .O_vsync(), .O_hsync(), .O_user(), .O_last(),

@@ -32,6 +32,10 @@ module tb_detect_color_mask;
     reg  [23:0] I_rgb   = 24'd0;
     reg  [1:0]  I_color_sel = 2'd0;
 
+    // ★ 2026-10-10 改造：公共坐标改为外部输入（模拟 pix_coord_gen 输出）
+    reg  [10:0] I_pix_x = 11'd0;
+    reg  [9:0]  I_pix_y = 10'd0;
+
     wire        O_mask, O_mask_r, O_mask_g, O_mask_b;
     wire [7:0]  O_y, O_cb, O_cr;
     wire        O_de, O_vsync, O_hsync, O_user, O_last, O_frame_done;
@@ -45,7 +49,8 @@ module tb_detect_color_mask;
     detect_color_mask #(
         .IMG_WIDTH  (W),
         .IMG_HEIGHT (H),
-        .PIPE_DELAY (0)
+        .PIPE_DELAY (0),
+        .PIX_DLY    (0)          // TB 直接喂未延时的坐标
     ) dut (
         .clk         (clk),
         .rst_n       (rst_n),
@@ -55,6 +60,8 @@ module tb_detect_color_mask;
         .I_user      (I_user),
         .I_last      (I_last),
         .I_rgb       (I_rgb),
+        .I_pix_x     (I_pix_x),
+        .I_pix_y     (I_pix_y),
         .I_color_sel (I_color_sel),
         .O_mask      (O_mask),
         .O_mask_r    (O_mask_r),
@@ -120,13 +127,16 @@ module tb_detect_color_mask;
 
         // ---- 帧起始：user 一拍 ----
         I_user = 1'b1; I_de = 1'b0; I_last = 1'b0;
+        I_pix_x = 11'd0; I_pix_y = 10'd0;
         @(negedge clk);
         I_user = 1'b0;
 
-        // ---- 逐行送像素 ----
+        // ---- 逐行送像素（同时驱动与像素同拍的公共坐标）----
         for (i = 0; i < N; i = i + 1) begin
             I_de   = 1'b1;
             I_rgb  = vec[i];
+            I_pix_x = i % W;          // 列号
+            I_pix_y = i / W;          // 行号
             I_last = ((i % W) == (W - 1)) ? 1'b1 : 1'b0;
             @(negedge clk);
         end

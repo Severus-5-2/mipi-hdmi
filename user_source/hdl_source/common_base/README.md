@@ -16,13 +16,21 @@
 common_base/
 ├── README.md              本文件
 ├── common_defs.vh         全局常量、位宽、接口位域（★ 接口宪法）
-├── pix_counter.v          公共像素坐标 x/y + frame_done（§1.3）
+├── pix_counter.v          ⚠️ 已作废（见下）——坐标源改用张铭晨的 track_box/pix_coord_gen.v
 ├── ycbcr_convert.v        RGB888 → YCbCr（§1.1，位级复用 chroma_denoise）
 ├── target_bus.v           目标列表总线打包/解包（§4：艺 → 晨）
 ├── conn_label.v           [待建] 游程法连通域（D2，张金艺主导）
 ├── conn_features.v        [待建] 帧末特征统计：面积/Σx/Σy/bbox
 └── div_shift_sub.v        [待建] 移位-减法除法器（消隐期质心除法）
 ```
+
+> ⚠️ **2026-10-10 修订（对账后）**：坐标计数器**不放在本目录**。
+> 全队统一使用**张铭晨的 `user_source/hdl_source/track_box/rtl/pix_coord_gen.v`**
+> （场消隐期归零，已修掉首行偏移；自带 `_1d`/`_2d` 延时输出）。
+> 本目录 `pix_counter.v` **作废**，参见 `doc/接口对齐结论-2026-10-10.md`。
+>
+> 保留原则：**本目录只保留「张铭晨未实现的」+「双方共享的接口约定」**，
+> 避免同一功能出现两份实现（分叉 = 合板出错）。
 
 ---
 
@@ -84,6 +92,7 @@ iverilog -I user_source/hdl_source/common_base \
 | 日期 | 修改人 | 内容 | 双方确认 |
 |:---|:---|:---|:---|
 | 2026-10-10 | 张金艺 | 首版建立：`common_defs.vh` / `pix_counter.v` / `ycbcr_convert.v` / `target_bus.v` | 待确认 |
+| 2026-10-10 | 张金艺 | 对账后修订：坐标源改用张铭晨 `pix_coord_gen.v`，`pix_counter.v` 作废；明确「保留但避重」原则 | 待确认 |
 
 ---
 

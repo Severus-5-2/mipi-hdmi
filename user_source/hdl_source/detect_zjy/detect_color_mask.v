@@ -29,10 +29,17 @@
 //   拍 3  : P3 —— 双阈值比较（掩膜）+ 限幅（≈3 级）
 //
 //   总延迟 = 3 拍。模块内部自动把 I_de / I_vsync / I_hsync / I_user / I_last
-//   以及自建的 pix_x / pix_y 计数器同步延时 3 拍，与 O_* 输出严格对齐，
+//   以及**外部输入的公共坐标 I_pix_x / I_pix_y** 同步延时 3 拍，与 O_* 输出严格对齐，
 //   因此下游拿到的 (O_mask, O_de, O_pix_x, O_pix_y) 是同一像素。
 //
-//   ⚠ 输入侧对齐：本模块假定 I_rgb 与 I_de 同拍。但工程里 S_video_sat 比
+//  ★ 2026-10-10 改造：坐标改为「接入公共坐标」，不再自建计数器
+//     · 依方案B §1.3 + 对账结论：全队统一用 `track_box/rtl/pix_coord_gen.v`
+//       生成的 `S_pix_x` / `S_pix_y`。本模块删除内部 x_cnt / y_cnt。
+//     · 输入请接 `S_pix_x_2d` / `S_pix_y_2d`（已延时 2 拍），并把 PIX_DLY 设 2；
+//       模块内部再经 2 级寄存器 ⇒ 合计与 3 拍流水严格对齐。
+//     · ⚠ 若接未延时的 `S_pix_x`，请把 PIX_DLY 设 0（模块会自动补足 3 级）。
+//
+//  ⚠ 输入侧对齐：本模块假定 I_rgb 与 I_de 同拍。但工程里 S_video_sat 比
 //     S_hdmi_de 滞后若干拍（gamma 1 + chroma_denoise + sat_enhance 2）。
 //     若直接接 S_hdmi_de，请把差值填进 PIPE_DELAY（用法同 ae_meter.PIPE_DELAY）。
 //
@@ -54,6 +61,14 @@ module detect_color_mask #(
     parameter integer IMG_WIDTH  = 1280,   // 一行有效像素数，必须与视频时序一致
     parameter integer IMG_HEIGHT = 720,    // 一帧有效行数
     parameter integer PIPE_DELAY = 0,      // I_rgb 相对 I_de 的滞后拍数（0~15）
+    //------------------------------------------------------------------
+    // 公共坐标的「已延时拍数」——由调用方按所接信号决定：
+    //    接 S_pix_x_2d → PIX_DLY = 2（推荐，与 S_video_sat 同舞台）
+    //    接 S_pix_x    → PIX_DLY = 0
+    //    接 S_pix_x_1d → PIX_DLY = 1
+    //  模块内部固定再补 (2 - PIX_DLY) 级，使坐标与 3 拍流水严格对齐。
+    //------------------------------------------------------------------
+    parameter integer PIX_DLY   = 2,
 
     //------------------------------------------------------------------
     // 亮度门限（抑制高增益下的暗部彩色噪点；0 = 关闭门控）
@@ -90,6 +105,10 @@ module detect_color_mask #(
 
     // ---- 像素数据 ----
     input  wire [23:0] I_rgb,        // 来自 S_video_sat（{R[7:0], G[7:0], B[7:0]}）
+
+    // ---- 公共像素坐标（★ 接 pix_coord_gen 的输出，不再自建计数器）----
+    input  wire [10:0] I_pix_x,      // 0 ~ 1279，接 S_pix_x_2d（配 PIX_DLY=2）
+    input  wire [9:0]  I_pix_y,      // 0 ~  719，接 S_pix_y_2d
 
     // ---- 目标颜色选择（拨码 / 按键，静态信号）----
     //      2'd0 = 红   2'd1 = 蓝   2'd2 = 绿   2'd3 = 三色取或
@@ -155,31 +174,62 @@ module detect_color_mask #(
     wire [23:0] w_rgb = I_rgb;   // I_rgb 已按 PIPE_DELAY 对齐，直接使用
 
     //==================================================================
-    // 1. 像素坐标计数器（本模块自建，后续可整体替换为顶层公共信号）
-    //    约定完全对齐 hdmi_mixer.v：
-    //      · I_user 有效      → x = 0, y = 0（帧起始）
-    //      · I_de 有效且 last → x = 0, y = y + 1（换行）
-    //      · I_de 有效        → x = x + 1
+    // 1. 公共坐标对齐（★ 2026-10-10 改造：不再自建计数器）
+    //------------------------------------------------------------------
+    //  依方案B §1.3 + 对账结论：全队统一使用 pix_coord_gen.v 生成的
+    //  S_pix_x / S_pix_y。本模块只做「延时对齐」，不再自建 x/y 计数器。
+    //
+    //  对齐推导（以"拍 0" = 输入像素 I_rgb 所在拍为基准）：
+    //    · 掩膜路径：拍 0 输入 → P1 → P2 → P3 → O_mask，合计 **3 拍**。
+    //    · 调用方送入的 I_pix_x **已经延时了 PIX_DLY 拍**
+    //      （接 S_pix_x_2d ⇒ PIX_DLY=2）。故本模块只需再延 (3 - PIX_DLY) 拍。
+    //
+    //  拍数推导（以 PIX_DLY=0 为例，位级实测校准）：
+    //    · 掩膜路径：I_rgb(C0) → P1(C1) → P2(C2) → O_mask(C3)，共 3 拍。
+    //      ⇒ O_pix_x 必须也在 C3 给出「C0 那个像素」的坐标。
+    //    · pxc 链：pxc[0] 在 C1 = C0 的 I_pix_x；pxc[1] 在 C2 = C0 的 I_pix_x；
+    //              pxc[2] 在 C3 = C0 的 I_pix_x。
+    //    · O_pix_x 是「输出级寄存」，在 C3 时刻取的是 **C2 时该组合值**。
+    //      故要拿到「C0 的坐标」，输出级输入应取 **C2 时刻等于 C0 坐标的那一级**
+    //      ⇒ 即 pxc[1]（PIX_DLY=0）。
+    //
+    //  ⇒ 抽头 = 1 - PIX_DLY：
+    //        PIX_DLY = 2 → 输出级接 I_pix_x 本身（外部已延 2，内部再 1 → 共 3）
+    //        PIX_DLY = 1 → 输出级接 pxc[0]
+    //        PIX_DLY = 0 → 输出级接 pxc[1]
+    //    （★ 此映射由 iverilog 逐拍实测校准，见 cnt 测试：B_px 与 A_px 同为 3 拍对齐）
+    //
+    //  ⚠ 历史教训：坐标延时**必须与掩膜路径严格相等**，差一拍就整帧错位
+    //    （2026-10-09 位级仿真抓到的 BUG #1 就是差一拍）。
+    //  ⚠ PIX_DLY 只允许 0 / 1 / 2（超出范围在本工程无意义）。
     //==================================================================
-    reg [10:0] x_cnt;
-    reg [9:0]  y_cnt;
+    reg [10:0] pxc [0:2];     // 坐标 x 延时链：pxc[0]=I_pix_x(延1拍), pxc[1]=延2拍
+    reg [9:0]  pyc [0:2];     // 坐标 y 延时链
 
+    integer pi;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            x_cnt <= 11'd0;
-            y_cnt <= 10'd0;
-        end else if (w_user) begin
-            x_cnt <= 11'd0;
-            y_cnt <= 10'd0;
-        end else if (w_de) begin
-            if (w_last) begin
-                x_cnt <= 11'd0;
-                y_cnt <= (y_cnt == (IMG_HEIGHT - 1)) ? 10'd0 : (y_cnt + 10'd1);
-            end else begin
-                x_cnt <= (x_cnt == (IMG_WIDTH - 1)) ? 11'd0 : (x_cnt + 11'd1);
+            for (pi = 0; pi <= 2; pi = pi + 1) begin
+                pxc[pi] <= 11'd0;
+                pyc[pi] <= 10'd0;
+            end
+        end else begin
+            pxc[0] <= I_pix_x;
+            pyc[0] <= I_pix_y;
+            for (pi = 1; pi <= 2; pi = pi + 1) begin
+                pxc[pi] <= pxc[pi-1];
+                pyc[pi] <= pyc[pi-1];
             end
         end
     end
+
+    //  按 PIX_DLY 选出「第 5 节输出级寄存的输入」（抽头 = 1 - PIX_DLY）
+    wire [10:0] w_px_aligned = (PIX_DLY >= 2) ? I_pix_x :
+                               (PIX_DLY == 1) ? pxc[0] :
+                               /* PIX_DLY == 0 */ pxc[1];
+    wire [9:0]  w_py_aligned = (PIX_DLY >= 2) ? I_pix_y :
+                               (PIX_DLY == 1) ? pyc[0] :
+                               /* PIX_DLY == 0 */ pyc[1];
 
     //==================================================================
     // 2. P1：常量乘积寄存（9 个并行，各自 ≤4 级逻辑）
@@ -295,10 +345,8 @@ module detect_color_mask #(
     //     比坐标/掩膜的 3 级多出一拍 ⇒ 每个像素都错位一个，首像素被丢。
     //     ⇒ 时序标志统一用 **2bit 移位 + 取 [1]**，正好 3 级：
     //        w_de(C0) → d3_de[0](C1) → d3_de[1](C2) → O_de(C3)
-    //     坐标同理：x_cnt(C0) → d3_x_0(C1) → d3_x_1(C2) → O_pix_x(C3)
+    //     坐标由第 1 节的延时链按 PIX_DLY 抽头给出（已对齐到同一拍），不再另加。
     reg [1:0] d3_de, d3_vsync, d3_hsync, d3_user, d3_last;
-    reg [10:0] d3_x_0, d3_x_1;
-    reg [9:0]  d3_y_0, d3_y_1;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -307,9 +355,6 @@ module detect_color_mask #(
             d3_hsync <= 2'd0;
             d3_user  <= 2'd0;
             d3_last  <= 2'd0;
-
-            d3_x_0 <= 11'd0; d3_x_1 <= 11'd0;
-            d3_y_0 <= 10'd0; d3_y_1 <= 10'd0;
 
             O_mask   <= 1'b0;
             O_mask_r <= 1'b0;
@@ -335,10 +380,6 @@ module detect_color_mask #(
             d3_user  <= {d3_user [0], w_user};
             d3_last  <= {d3_last [0], w_last};
 
-            // 坐标：计数器本身在拍 0，需再延 2 拍与 P3 对齐
-            d3_x_0 <= x_cnt;      d3_x_1 <= d3_x_0;
-            d3_y_0 <= y_cnt;      d3_y_1 <= d3_y_0;
-
             // --- 数据输出 ---
             O_mask   <= w_mask_sel;
             O_mask_r <= w_mask_r;
@@ -354,8 +395,8 @@ module detect_color_mask #(
             O_hsync <= d3_hsync[1];
             O_user  <= d3_user[1];
             O_last  <= d3_last[1];
-            O_pix_x <= d3_x_1;
-            O_pix_y <= d3_y_1;
+            O_pix_x <= w_px_aligned;    // 第 1 节延时链已按 PIX_DLY 对齐到同一拍
+            O_pix_y <= w_py_aligned;
 
             // 帧末脉冲：对齐后的 I_user（此刻上一帧像素已全部流出流水线）
             O_frame_done <= d3_user[1];
