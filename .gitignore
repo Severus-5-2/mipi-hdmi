@@ -62,6 +62,12 @@ __pycache__/
 *.pyc
 *.pyo
 
+# ===== 位级仿真过程产物（iverilog/vvp 可重新生成）=====
+*.out
+*.vcd
+*_result.txt
+*.vvp
+
 # ===== 过程产物：数据手册文本抽取（可重新生成，且有版权风险）=====
 user_source/hdl_source/gamma_fix/refs/
 
