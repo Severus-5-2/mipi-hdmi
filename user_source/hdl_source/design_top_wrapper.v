@@ -1,6 +1,6 @@
 
 
-`include "common_defs.vh"
+`include "common_base/common_defs.vh"
 
 module design_top_wrapper (
     input wire        I_sys_clk,

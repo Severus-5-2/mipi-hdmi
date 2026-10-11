@@ -24,11 +24,11 @@ verify_conn_label.py — conn_label.v 位级对拍（解析派）
 """
 
 import os
+import re
 import subprocess
 import sys
 
 W, H = 32, 16
-NEG = 32
 MIN_AREA = 1
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +36,26 @@ SIM = os.path.join(HERE, "sim")
 
 IVERILOG = r"C:\iverilog\bin\iverilog.exe"
 VVP = r"C:\iverilog\bin\vvp.exe"
+
+
+def read_neg_from_rtl():
+    """从 conn_label.v 读取 `localparam integer NEG = <n>`，保证参考模型与 RTL 同源。
+
+    ★ 面积优化（v1.5.1）后 NEG 是可调的内部展开深度（32 → 8）。若参考模型
+      硬编码 32 而 RTL 是 8，则「超上限丢弃游程」的图样（40 个孤立点）必然对不上。
+      这里改为自动读取，避免双份维护。
+    """
+    src = os.path.join(HERE, "conn_label.v")
+    with open(src, "r", encoding="utf-8") as f:
+        txt = f.read()
+    m = re.search(r"localparam\s+integer\s+NEG\s*=\s*(\d+)\s*;", txt)
+    if not m:
+        raise RuntimeError("未能从 conn_label.v 解析出 NEG（localparam integer NEG = <n>;）")
+    return int(m.group(1))
+
+
+NEG = read_neg_from_rtl()
+print(f"[info] 从 conn_label.v 读取到 NEG = {NEG}")
 
 
 # ---------------------------------------------------------------------------

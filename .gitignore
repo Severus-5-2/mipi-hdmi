@@ -70,6 +70,14 @@ __pycache__/
 # 位级对拍 dump（verify_*.py 可重新生成；pattern*.hex 为激励，需入库）
 user_source/hdl_source/common_base/sim/*_out*.txt
 
+# ===== 位级对拍参考模型（可从 git 历史重新生成，避免仓库膨胀 ~294KB）=====
+#   sim_hdl/logo_rom_ref_case.v = anlogic_logo_rom.v 改造成 ERAM 版之前的 case 版
+#   重新生成：
+#     git show <改造前commit>:user_source/hdl_source/anlogic_logo_rom.v \
+#       | sed 's/^module anlogic_logo_rom (/module logo_rom_ref_case (/' \
+#       > user_source/hdl_source/sim_hdl/logo_rom_ref_case.v
+user_source/hdl_source/sim_hdl/logo_rom_ref_case.v
+
 # ===== 过程产物：数据手册文本抽取（可重新生成，且有版权风险）=====
 user_source/hdl_source/gamma_fix/refs/
 

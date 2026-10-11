@@ -10,7 +10,8 @@
 //      ① 行内游程（RLE）：一行内连续的 "1" 合并成一个游程 [start, end]
 //      ② 行间并查表    ：本行游程与上一行游程水平重叠 → 继承 label；
 //                        与多个已有 label 重叠 → 记录等价对
-//      ③ 等价表        ：深度 32（纯寄存器，不用 BRAM），帧末统一解析
+//      ③ 等价表        ：内部展开深度 NEG（纯寄存器，不用 BRAM），帧末分时解析
+//                        ★ v1.5.1：NEG = 8（原 32），纯内部参数，不影响对外接口
 //      ④ 帧末统计      ：每 label 的 area(Σ1) / Σx / Σy / xmin,xmax / ymin,ymax
 //      ⑤ 消隐期质心除法：cx=Σx/area，移位-减法除法器，不在像素流里做
 //      ⑥ 颜色分类      ：每 label 锁存「首个被指派时的已知色」，帧末随
@@ -86,9 +87,19 @@ module conn_label #(
     //  0. 常量
     //=========================================================================
     localparam integer LW  = 6;
-    localparam integer NEG = 32;                  // 展开深度（固定 32）
+    // ★ 面积优化（v1.5.1）：展开深度 32 → 8。
+    //   本参数是**纯内部**的「单帧最多同时跟踪的连通域数」，**不影响对外接口**
+    //   （`O_label`/`O_cmp_label`/`O_cmp_cnt` 仍为 6 bit，`LABEL_MAX` 宏仍是 32）。
+    //   用途场景（红球/蓝方块/绿三角）最多 3~4 个连通域，8 有充足余量。
+    //   缘由：TD 综合显示 `conn_label` 占 77,949 LUT（超器件 21,216 的 3.7 倍），
+    //         主因是 33 项数组的动态索引 MUX；降深度是全局线性缩减，最有效。
+    //
+    //   ⚠ 行为边界（必须知道）：同一帧内若**同时存在** > NEG 个互不连通的区域，
+    //     只有**最先出现的 NEG 个**会进入 O_cmp_*，其余被丢弃（统计也不入桶）。
+    //     这与原 LBMAX=32 的降级路径语义完全一致，只是门限从 32 收到 8。
+    localparam integer NEG = 8;                   // 展开深度（内部连通域上限）
+    localparam [LW-1:0] CC_MAX = NEG[LW-1:0];     // 内部 label 分配上限（替代 LBMAX）
 
-    localparam [LW-1:0]  LBMAX = LABEL_MAX[LW-1:0];
     localparam [19:0]    MINA  = MIN_AREA[19:0];
     localparam [10:0]    XINIT = 11'd2047;        // xmin 初始
     localparam [9:0]     YINIT = 10'd1023;        // ymin 初始
@@ -118,7 +129,12 @@ module conn_label #(
         end
     endfunction
 
-    // 帧末用：完全解析（最多 32 次迭代，保证拿到真正的根）
+    // 帧末用：完全解析（保证拿到真正的根）
+    //  ⚠ 面积优化（v1.5.1）：原写法是「函数 + 内 32 级 for 循环」，被 S_IDLE 的
+    //    `for(ii=0..32)` 调用 33 次 → 综合器内联 33 份 32 级指针链 ≈ 数万 LUT。
+    //    现改为**状态机分时**：S_RSLV 状态每拍推进一级，全 33 个 label 共用
+    //    同一套指针追踪逻辑（综合器只生成 1 份）。功能完全等价。
+    //  （保留函数定义供 TB/其它零散引用，但主路径已不用它。）
     function [LW-1:0] resolve_full;
         input [LW-1:0] x;
         reg   [LW-1:0] t;
@@ -220,8 +236,8 @@ module conn_label #(
     reg [LW-1:0] cnt_wr, cnt_rd;
     reg          wr_bank;
 
-    wire [6:0] wr_base = wr_bank ? 7'd32 : 7'd0;
-    wire [6:0] rd_base = wr_bank ? 7'd0  : 7'd32;
+    wire [6:0] wr_base = wr_bank ? NEG[6:0] : 7'd0;
+    wire [6:0] rd_base = wr_bank ? 7'd0 : NEG[6:0];
 
     //=========================================================================
     //  4. 行间重叠比对 + label 指派 + 等价记录
@@ -251,29 +267,55 @@ module conn_label #(
         end
     endfunction
 
-    wire [LW-1:0] t1 [0:15];
-    wire [LW-1:0] t2 [0:7];
-    wire [LW-1:0] t3 [0:3];
-    wire [LW-1:0] t4 [0:1];
+    // ★ 面积优化（v1.5.1）：归约树按 NEG 自适应（原来硬编码 32 项 → 三分树）。
+    //   现改为通用「逐级对折」：每级把上一级的相邻两项 min2 合并，直到只剩 1 项。
+    //   NEG=8 时：8 → 4 → 2 → 1，共 3 级 7 个 min2。
+    wire [LW-1:0] lv1 [0:NEG-1];          // 第一级：命中则取 label，否则 0
     wire [LW-1:0] min_lbl;
 
     generate
-        for (gj = 0; gj < 16; gj = gj + 1)
-            assign t1[gj] = min2(ovl_hit[2*gj]   ? prv_lbl[2*gj]   : {LW{1'b0}},
-                                 ovl_hit[2*gj+1] ? prv_lbl[2*gj+1] : {LW{1'b0}});
-        for (gj = 0; gj < 8; gj = gj + 1)
-            assign t2[gj] = min2(t1[2*gj], t1[2*gj+1]);
-        for (gj = 0; gj < 4; gj = gj + 1)
-            assign t3[gj] = min2(t2[2*gj], t2[2*gj+1]);
-        for (gj = 0; gj < 2; gj = gj + 1)
-            assign t4[gj] = min2(t3[2*gj], t3[2*gj+1]);
-        assign min_lbl = min2(t4[0], t4[1]);
+        for (gj = 0; gj < NEG; gj = gj + 1)
+            assign lv1[gj] = ovl_hit[gj] ? prv_lbl[gj] : {LW{1'b0}};
+    endgenerate
+
+    generate
+        if (NEG == 8) begin : g_red8
+            wire [LW-1:0] l4 [0:3];
+            wire [LW-1:0] l2 [0:1];
+            for (gj = 0; gj < 4; gj = gj + 1)
+                assign l4[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
+            for (gj = 0; gj < 2; gj = gj + 1)
+                assign l2[gj] = min2(l4[2*gj], l4[2*gj + 1]);
+            assign min_lbl = min2(l2[0], l2[1]);
+        end else if (NEG == 4) begin : g_red4
+            wire [LW-1:0] l2 [0:1];
+            for (gj = 0; gj < 2; gj = gj + 1)
+                assign l2[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
+            assign min_lbl = min2(l2[0], l2[1]);
+        end else if (NEG == 16) begin : g_red16
+            wire [LW-1:0] l8 [0:7];
+            wire [LW-1:0] l4 [0:3];
+            wire [LW-1:0] l2 [0:1];
+            for (gj = 0; gj < 8; gj = gj + 1)
+                assign l8[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
+            for (gj = 0; gj < 4; gj = gj + 1)
+                assign l4[gj] = min2(l8[2*gj], l8[2*gj + 1]);
+            for (gj = 0; gj < 2; gj = gj + 1)
+                assign l2[gj] = min2(l4[2*gj], l4[2*gj + 1]);
+            assign min_lbl = min2(l2[0], l2[1]);
+        end else if (NEG == 2) begin : g_red2
+            assign min_lbl = min2(lv1[0], lv1[1]);
+        end else begin : g_red_unsup
+            assign min_lbl = {LW{1'b0}};      // 兜底（不应走到）
+        end
     endgenerate
 
     //---- 新 label 分配（7 bit 便于判越界）----
     reg [6:0]     lbl_next;
     wire          need_new = (min_lbl == {LW{1'b0}});
-    wire          lbl_ok   = !(need_new && (lbl_next > {1'b0, LBMAX}));
+    // ★ 面积优化（v1.5.1）：分配上限改为内部深度 CC_MAX(=NEG)，不再用接口宏 LBMAX(=32)。
+    //   保证分配出的 label 一定落在 NEG 项数组（eq/cls_lbl/acc_*）的合法下标内。
+    wire          lbl_ok   = !(need_new && (lbl_next > {1'b0, CC_MAX}));
     wire [LW-1:0] fresh    = lbl_next[LW-1:0];
     wire [LW-1:0] lbl_use  = need_new ? fresh : min_lbl;
     wire          ev_ok    = ev_valid && lbl_ok;
@@ -295,7 +337,7 @@ module conn_label #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)            lbl_next <= 7'd1;
         else if (I_frame_done) lbl_next <= 7'd1;
-        else if (ev_ok && need_new && (lbl_next <= {1'b0, LBMAX}))
+        else if (ev_ok && need_new && (lbl_next <= {1'b0, CC_MAX}))
             lbl_next <= lbl_next + 7'd1;
     end
 
@@ -407,7 +449,7 @@ module conn_label #(
             else if (swap_wait != 4'd0) swap_wait <= swap_wait - 4'd1;
 
             if (ev_ok) begin
-                if (cnt_wr < LBMAX) begin
+                if (cnt_wr < CC_MAX) begin
                     rbuf_s[wr_base + cnt_wr] <= ev_x0;
                     rbuf_e[wr_base + cnt_wr] <= ev_x1;
                     rbuf_l[wr_base + cnt_wr] <= need_new ? fresh : min_lbl;
@@ -474,7 +516,8 @@ module conn_label #(
                      S_SCAN = 3'd2,
                      S_DIV  = 3'd3,
                      S_OUT  = 3'd4,
-                     S_CLR  = 3'd5;
+                     S_CLR  = 3'd5,
+                     S_RSLV = 3'd6;    // ★面积优化：分时解析（替代 33 份 resolve_full 内联）
 
     reg [2:0]    st;
     reg [LW-1:0] root  [0:NEG];
@@ -496,6 +539,23 @@ module conn_label #(
     reg [6:0]  cid;                    // 当前处理的 label（1..32）
     reg [2:0]  dsub;                   // 除法子状态 0..4
     reg [5:0]  dbit;                   // 除法位计数 30..0
+
+    // ★ 面积优化：S_RSLV 分时解析用的寄存器（替代 33 份 resolve_full 内联）
+    reg [6:0]  rq_i;                   // 当前解析到第几个 label（0..32）
+    reg [6:0]  rk;                     // 指针追踪已走级数（0..NEG）
+    reg [LW-1:0] rt;                   // 指针追踪当前值
+
+    // ★ 面积优化：S_ADDM 两拍法的中间寄存器（消除双重动态索引）
+    reg        adsub;                  // 0=读 root/acc，1=写 tp
+    reg [LW-1:0] adx;                  // root[fs] 的读出值（第二拍用作 tp 下标）
+    reg        ad_v;                   // acc_area[fs] != 0
+    reg [19:0] ada_area;               // acc_area[fs]
+    reg [30:0] ada_sumx;               // acc_sumx[fs]
+    reg [29:0] ada_sumy;               // acc_sumy[fs]
+    reg [10:0] ada_xmin;
+    reg [10:0] ada_xmax;
+    reg [9:0]  ada_ymin;
+    reg [9:0]  ada_ymax;
 
     // 除法器
     reg [30:0] dv_val;
@@ -527,6 +587,19 @@ module conn_label #(
             cid         <= 7'd1;
             dsub        <= 3'd0;
             dbit        <= 6'd30;
+            rq_i        <= 7'd0;
+            rk          <= 7'd0;
+            rt          <= {LW{1'b0}};
+            adsub       <= 1'b0;
+            adx         <= {LW{1'b0}};
+            ad_v        <= 1'b0;
+            ada_area    <= 20'd0;
+            ada_sumx    <= 31'd0;
+            ada_sumy    <= 30'd0;
+            ada_xmin    <= 11'd0;
+            ada_xmax    <= 11'd0;
+            ada_ymin    <= 10'd0;
+            ada_ymax    <= 10'd0;
             dv_val      <= 31'd0;
             dv_rem      <= 31'd0;
             dv_area     <= 20'd0;
@@ -553,54 +626,105 @@ module conn_label #(
             //-------------------------------------------------------------
             S_IDLE: begin
                 if (frame_end) begin
-                    for (ii = 0; ii <= NEG; ii = ii + 1) begin
-                        root[ii] <= resolve_full(ii[LW-1:0]);   // ★ 完全解析
-                        cmap[ii] <= 6'd0;
-                        rofc[ii] <= 6'd0;
-                        tp_area[ii] <= 20'd0;
-                        tp_sumx[ii] <= 31'd0;
-                        tp_sumy[ii] <= 30'd0;
-                        tp_xmin[ii] <= XINIT;
-                        tp_xmax[ii] <= 11'd0;
-                        tp_ymin[ii] <= YINIT;
-                        tp_ymax[ii] <= 10'd0;
+                    // ★ 面积优化：不再 33 份内联 resolve_full，改为进入 S_RSLV 分时解析。
+                    //   同时把 tp_* / cmap / rofc 的清零也一起分时做（原本在同一拍展开）。
+                    rq_i <= 7'd0;
+                    rk   <= 7'd0;
+                    rt   <= {LW{1'b0}};
+                    st   <= S_RSLV;
+                end
+            end
+            //-------------------------------------------------------------
+            // ★ S_RSLV：分时解析等价表 + 清零 tp_*/cmap/rofc（每拍 1 个 label）
+            //   rq_i：第几个 label（0..NEG）
+            //   rk  ：指针追踪已走级数（0..NEG）
+            //   语义严格等价于原 `resolve_full(x)`：t=x; 重复 NEG 次 t<=eq[t]。
+            //   实现：rq_i 从 0..NEG，每个 label 走 NEG 级，共 (NEG+1)*(NEG+1) 拍。
+            S_RSLV: begin
+                if (rk == 7'd0) begin
+                    // 起点：rt = rq_i，开始追踪
+                    rt <= rq_i[LW-1:0];
+                    rk <= 7'd1;
+                end else if (rk == (NEG + 1)) begin
+                    // 已走满 NEG 级（rk 从 1..NEG 共 NEG 拍完成 NEG 次 eq 追踪）
+                    // 此时 rt 即根，写回 root 并清零该 label 的汇总槽
+                    root[rq_i[5:0]]  <= rt;
+                    cmap[rq_i[5:0]]  <= 6'd0;
+                    rofc[rq_i[5:0]]  <= 6'd0;
+                    tp_area[rq_i[5:0]] <= 20'd0;
+                    tp_sumx[rq_i[5:0]] <= 31'd0;
+                    tp_sumy[rq_i[5:0]] <= 30'd0;
+                    tp_xmin[rq_i[5:0]] <= XINIT;
+                    tp_xmax[rq_i[5:0]] <= 11'd0;
+                    tp_ymin[rq_i[5:0]] <= YINIT;
+                    tp_ymax[rq_i[5:0]] <= 10'd0;
+                    rk <= 7'd0;
+                    if (rq_i == NEG[6:0]) begin
+                        rq_i <= 7'd0;
+                        fs   <= 7'd0;
+                        st   <= S_ADDM;
+                    end else begin
+                        rq_i <= rq_i + 7'd1;
                     end
-                    fs <= 7'd0;
-                    st <= S_ADDM;
+                end else begin
+                    rt <= eq[rt];
+                    rk <= rk + 7'd1;
                 end
             end
             //-------------------------------------------------------------
             // 把 acc[i] 归入 tp[root[i]]
+            //-------------------------------------------------------------
+            // 把 acc[i] 归入 tp[root[i]]
+            // ★ 面积优化：原写法 `tp_xxx[root[fs]]` 是**双重动态索引**（先查 root[fs]
+            //   再用结果索引 tp_xxx），综合器要同时生成两套 33:1 MUX + 写译码。
+            //   现拆成**两拍**：
+            //     adsub==0：读 root[fs] → adx（寄存），读 acc_*[fs] → ada_*（寄存）
+            //     adsub==1：用 adx 索引 tp_*，做累加/比较，写回
+            //   功能等价，只是每个 label 多用 1 拍（33 拍 → 66 拍，可忽略）。
             S_ADDM: begin
-                if (fs <= 7'd32) begin
-                    if (acc_area[fs[5:0]] != 20'd0) begin
-                        tp_area[root[fs[5:0]]] <=
-                            tp_area[root[fs[5:0]]] + acc_area[fs[5:0]];
-                        tp_sumx[root[fs[5:0]]] <=
-                            tp_sumx[root[fs[5:0]]] + acc_sumx[fs[5:0]];
-                        tp_sumy[root[fs[5:0]]] <=
-                            tp_sumy[root[fs[5:0]]] + acc_sumy[fs[5:0]];
-                        if (acc_xmin[fs[5:0]] < tp_xmin[root[fs[5:0]]])
-                            tp_xmin[root[fs[5:0]]] <= acc_xmin[fs[5:0]];
-                        if (acc_xmax[fs[5:0]] > tp_xmax[root[fs[5:0]]])
-                            tp_xmax[root[fs[5:0]]] <= acc_xmax[fs[5:0]];
-                        if (acc_ymin[fs[5:0]] < tp_ymin[root[fs[5:0]]])
-                            tp_ymin[root[fs[5:0]]] <= acc_ymin[fs[5:0]];
-                        if (acc_ymax[fs[5:0]] > tp_ymax[root[fs[5:0]]])
-                            tp_ymax[root[fs[5:0]]] <= acc_ymax[fs[5:0]];
+                if (fs <= NEG[6:0]) begin
+                    if (adsub == 1'b0) begin
+                        // 拍 1：取 root[fs] 与 acc_*[fs]（单重索引）
+                        adx     <= root[fs[5:0]];
+                        ad_v    <= (acc_area[fs[5:0]] != 20'd0);
+                        ada_area<= acc_area[fs[5:0]];
+                        ada_sumx<= acc_sumx[fs[5:0]];
+                        ada_sumy<= acc_sumy[fs[5:0]];
+                        ada_xmin<= acc_xmin[fs[5:0]];
+                        ada_xmax<= acc_xmax[fs[5:0]];
+                        ada_ymin<= acc_ymin[fs[5:0]];
+                        ada_ymax<= acc_ymax[fs[5:0]];
+                        adsub   <= 1'b1;
+                    end else begin
+                        // 拍 2：用 adx 索引 tp_*（单重索引），累加/比较后写回
+                        if (ad_v) begin
+                            tp_area[adx] <= tp_area[adx] + ada_area;
+                            tp_sumx[adx] <= tp_sumx[adx] + ada_sumx;
+                            tp_sumy[adx] <= tp_sumy[adx] + ada_sumy;
+                            if (ada_xmin < tp_xmin[adx]) tp_xmin[adx] <= ada_xmin;
+                            if (ada_xmax > tp_xmax[adx]) tp_xmax[adx] <= ada_xmax;
+                            if (ada_ymin < tp_ymin[adx]) tp_ymin[adx] <= ada_ymin;
+                            if (ada_ymax > tp_ymax[adx]) tp_ymax[adx] <= ada_ymax;
+                        end
+                        adsub <= 1'b0;
+                        fs    <= fs + 7'd1;
                     end
-                    fs <= fs + 7'd1;
                 end else begin
-                    fs <= 7'd0;
-                    sc <= 6'd0;
-                    st <= S_SCAN;
+                    fs    <= 7'd0;
+                    sc    <= 6'd0;
+                    adsub <= 1'b0;
+                    st    <= S_SCAN;
                 end
             end
             //-------------------------------------------------------------
             // 紧凑编号：根且 area>=MIN_AREA → 1,2,3,...
             S_SCAN: begin
-                if (fs <= 7'd32) begin
-                    if ((root[fs[5:0]] == fs[5:0]) && (tp_area[fs[5:0]] >= MINA)) begin
+                if (fs <= NEG[6:0]) begin
+                    // 注意 rofc 只需 NEG+1 项，但 sc+1 最大 = NEG+1 会越界；
+                    // 只在 sc < NEG 时登记（第 NEG 个之后的组件按「超出内部跟踪上限」丢弃，
+                    // 统计仍保留在 tp_* 里，不进 O_cmp_* 输出 —— 与面积上限语义一致）。
+                    if ((root[fs[5:0]] == fs[5:0]) && (tp_area[fs[5:0]] >= MINA)
+                        && (sc < CC_MAX)) begin
                         cmap[fs[5:0]]      <= sc + 6'd1;
                         rofc[sc + 6'd1]    <= fs[5:0];
                         sc                 <= sc + 6'd1;
@@ -616,7 +740,7 @@ module conn_label #(
             //-------------------------------------------------------------
             // 质心除法：对每个紧凑组件算 cx、cy
             S_DIV: begin
-                if (cid > 7'd32) begin
+                if (cid > NEG[6:0]) begin
                     fs <= 7'd1;
                     st <= S_OUT;
                 end else begin
@@ -666,19 +790,19 @@ module conn_label #(
             //-------------------------------------------------------------
             // 输出脉冲流
             S_OUT: begin
-                if (fs <= 6'd32) begin
+                if (fs <= NEG[6:0]) begin
                     if ((fs >= 7'd1) && (fs <= {1'b0, O_cmp_cnt}) &&
-                        (rofc[fs] != 6'd0)) begin
+                        (rofc[fs[5:0]] != 6'd0)) begin
                         O_cmp_valid <= 1'b1;
                         O_cmp_label <= fs[5:0];
-                        O_cmp_cls   <= cls_lbl[rofc[fs]];
-                        O_cmp_area  <= tp_area[rofc[fs]];
-                        O_cmp_xmin  <= tp_xmin[rofc[fs]];
-                        O_cmp_xmax  <= tp_xmax[rofc[fs]];
-                        O_cmp_cx    <= cx_out[rofc[fs]];
-                        O_cmp_ymin  <= tp_ymin[rofc[fs]];
-                        O_cmp_ymax  <= tp_ymax[rofc[fs]];
-                        O_cmp_cy    <= cy_out[rofc[fs]];
+                        O_cmp_cls   <= cls_lbl[rofc[fs[5:0]]];
+                        O_cmp_area  <= tp_area[rofc[fs[5:0]]];
+                        O_cmp_xmin  <= tp_xmin[rofc[fs[5:0]]];
+                        O_cmp_xmax  <= tp_xmax[rofc[fs[5:0]]];
+                        O_cmp_cx    <= cx_out[rofc[fs[5:0]]];
+                        O_cmp_ymin  <= tp_ymin[rofc[fs[5:0]]];
+                        O_cmp_ymax  <= tp_ymax[rofc[fs[5:0]]];
+                        O_cmp_cy    <= cy_out[rofc[fs[5:0]]];
                     end
                     fs <= fs + 7'd1;
                 end else begin
