@@ -316,6 +316,7 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 | v5 | ① 黑电平前移到 RAW 域（AWB 之前）；② 新增 `chroma_denoise.v` 色度降噪 + `line_delay_ram.v` |
 | v6 | ① 修复黑电平**完全没扣**的 BUG（雾感真根因）；② 新增 AE 自动曝光闭环（`ae_meter` + `ae_set`）；③ 按键由扩展口改绑板载 KEY1/KEY2；④ 修复 AE 引入的两处时序违例（SDC false path + `ae_meter` 乘法打拍）；⑤ `ae_meter` v3 中央重点加权测光 |
 | v7 | **方案B：实时目标检测与跟踪**（张金艺 / 张铭晨）。新增 `common_base/`（`common_defs.vh` / `ycbcr_convert.v` / `target_bus.v` / `conn_label.v` / `conn_features.v`）+ `detect_zjy/detect_color_mask.v` + `track_box/`（`pix_coord_gen` / `box_draw` / `osd_coord` / `track_glyph_rom`）。链路：YCbCr 双阈值颜色掩膜 → 4 连通 RLE-CCL 连通域 → 帧末特征（面积 / bbox / 质心 / 颜色 cls）→ 前 4 目标 → 384bit 目标列表总线 → 画框 OSD。位级对拍全通过 |
+| v7.1 | 方案B **首次下板综合调优**（张金艺）：<br>① **面积**：首次综合 LUT **105,584**（455% 超限，`u_conn_label` 独占 77,949）→ 三刀优化（`S_RSLV` 分时解析 / `S_ADDM` 两拍流水 / 内部深度 `NEG` 32→8）+ logo ROM `case`→ERAM 数组 → LUT **20,299 / 21,216（达标）**，ERAM 64/108；<br>② **时序**：`Phy Opt not start` 根因定位为 `HDMI_PIXEL_CLK`(75MHz) 域 826 条违例（WNS −6.386ns），最差路径 `conn_label/wr_bank_reg → acc_ymax_reg[*].ce`（20 级、net 延迟占 68%、fanout 128）→ `rd_base` 寄存化 + `prv_lbl`/`ovl_hit` 插一级流水 + 事件字段同步打拍 → 四套位级回归 + 跨实现对拍全 PASS |
 
 ### v6 修复说明（黑电平一次都没扣）
 

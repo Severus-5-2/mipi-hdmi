@@ -110,7 +110,14 @@ module conn_label #(
     //    若在帧首触发，汇总 FSM 会与下一帧的有效行抢时间、把累加器清掉。
     //  改为内部检测「最后一行结束」，汇总 FSM 天然落在**场消隐期**：
     //    720p60 场消隐约 49500 拍，而 FSM 最坏约 2200 拍（32 个连通域）。
-    wire frame_end = I_de_d && !I_de && (I_pix_y == YLAST);
+    //  ★ v1.5.2：帧末触发另加 `&& !ev_valid` —— 与线间比对轮的「延后一拍」配套。
+    //    线间比对/游程写入统一切到 ev_valid_r 后，**行末那个游程**要延后一拍才被消费。
+    //    frame_end 那一拍正好是 ev_valid=1 的拍（见 RLE 行末收尾分支：!I_de && in_run
+    //    → ev_valid<=1），若此刻就进 FSM，下一拍 ev_valid_r=1 会把该游程误写进 rbuf，
+    //    导致下一帧开局用错 bank-0 → 全帧静默错位。
+    //    加 !ev_valid 后改为「ev_valid 落下的下一拍」进 FSM，此时 ev_valid_r 已消费完毕。
+    //    代价：FSM 起点晚 1 拍（消隐期 49500 拍，可忽略）。
+    wire frame_end = I_de_d && !I_de && (I_pix_y == YLAST) && !ev_valid;
 
     //=========================================================================
     //  1. 等价表（并查表，纯寄存器） + 3 级展开解析
@@ -236,14 +243,55 @@ module conn_label #(
     reg [LW-1:0] cnt_wr, cnt_rd;
     reg          wr_bank;
 
+    // ── bank 基址 ───────────────────────────────────────────────────────
+    //  ★ 时序优化（v1.5.2）：rd_base 由「组合推导」改为「寄存器输出」。
+    //    问题：原来 `wire rd_base = wr_bank ? 0 : NEG` 直接参与 24 个读口
+    //      （8 路 × 3 个数组 rbuf_s/e/l）的地址加法 → 综合报 fanout=128、
+    //      net 延迟 13.3ns（占最差路径 68%），最差路径 20 级逻辑、WNS -6.386ns
+    //      @ HDMI_PIXEL_CLK(75MHz)，826 条违例。
+    //    处置：rd_base 打一拍寄存（wr_base 保持组合，因为它只用于「写」且扇出小）。
+    //    等价性：wr_bank 只在 do_swap 那拍（行末 hblank 内）翻转，
+    //      而回放/行间比对都发生在**下一行 I_de 有效时**，hblank 有 ≥4 拍余量，
+    //      故 rd_base 晚一拍更新**不影响任何行为**（位级对拍已回归验证）。
     wire [6:0] wr_base = wr_bank ? NEG[6:0] : 7'd0;
-    wire [6:0] rd_base = wr_bank ? 7'd0 : NEG[6:0];
+    reg  [6:0] rd_base;
+
+    //  rd_base 必须在 do_swap 的**下一拍**就等于新的读 bank 基址。
+    //  原组合式：rd_base = wr_bank ? 0 : NEG                （读「非写入」那个 bank）
+    //  do_swap 那拍 wr_bank <= ~wr_bank（下一拍生效），
+    //  故寄存式 = 「下一拍的 wr_bank」代入原式 = (~wr_bank) ? 0 : NEG
+    //                                            = wr_bank ? NEG : 0
+    //  ⚠ 不能写成 `wr_bank ? 0 : NEG` —— 那会晚一拍、读错 bank（实测出 X）。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)            rd_base <= 7'd0;
+        else if (I_frame_done) rd_base <= 7'd0;
+        else if (do_swap)      rd_base <= wr_bank ? NEG[6:0] : 7'd0;
+    end
 
     //=========================================================================
     //  4. 行间重叠比对 + label 指派 + 等价记录
     //=========================================================================
-    wire [LW-1:0] prv_lbl [0:NEG-1];
-    wire          ovl_hit [0:NEG-1];
+    //  ★★ 时序优化（v1.5.2）：prv_lbl / ovl_hit 改为**寄存器输出**。
+    //    改造前最差路径（syn_1 报告，HDMI_PIXEL_CLK 75MHz，周期 13.333ns）：
+    //      wr_bank_reg → rd_base(组合) → DRAM 读 rbuf_* →
+    //      resolve3(3 级 eq 链) → hit 比较 → 8 级 min2 归约树 →
+    //      lbl_use → acc_* 写译码/加法 → acc_ymax_reg[*].ce
+    //      合计 20 级逻辑、Data Path 19.652ns（cell 32% / **net 68%**）、
+    //      Max Fanout 128 @ rd_base、WNS -6.386ns、826 条违例。
+    //    处置：在「命中/前驱 label 算出」之后插一级流水寄存器组 ——
+    //      （a）prv_lbl_r/ovl_hit_r：切掉「DRAM读+resolve3+比较+归约树」
+    //            对下游 acc_* 写译码的长组合链；
+    //      （b）事件字段 ev_*_r 同步打一拍，保证下游统计/等价/分类
+    //            用的全是**同一事件**（不能只延 prv_lbl 不延 ev_*，否则错配）。
+    //    流水后：第 1 段 = rd_base_reg → DRAM读 → resolve3 → hit 比较 → 寄存；
+    //            第 2 段 = 寄存 → 归约树 → lbl_use → acc 写译码 → acc_ymax.ce。
+    //    等价性：整条「行间比对/游程写入」通路统一延后一拍，
+    //      帧末 FSM 起点同步用 !ev_valid 避开行末残留事件，
+    //      仲裁 do_swap 也用 ev_valid_r，I_frame_done 清空 ev_valid_r，
+    //      位级对拍已全量回归验证（conn/target_bus/top_chain/common 四套全 PASS）。
+    //=========================================================================
+    wire [LW-1:0] prv_lbl_raw [0:NEG-1];
+    wire          ovl_hit_raw [0:NEG-1];
 
     genvar gj;
     generate
@@ -252,8 +300,67 @@ module conn_label #(
             wire hit_raw = j_valid
                          && (ev_x0 <= rbuf_e[rd_base + gj])
                          && (ev_x1 >= rbuf_s[rd_base + gj]);   // 4 连通水平重叠
-            assign ovl_hit[gj] = hit_raw && ev_valid;
-            assign prv_lbl[gj] = hit_raw ? resolve3(rbuf_l[rd_base + gj]) : {LW{1'b0}};
+            assign ovl_hit_raw[gj] = hit_raw && ev_valid;
+            assign prv_lbl_raw[gj] = hit_raw ? resolve3(rbuf_l[rd_base + gj]) : {LW{1'b0}};
+        end
+    endgenerate
+
+    //---- 一级流水寄存 ----------------------------------------------------
+    reg [LW-1:0] prv_lbl_r [0:NEG-1];
+    reg          ovl_hit_r [0:NEG-1];
+    // 事件字段随行打拍（下游一律用 *_r 版本）
+    reg          ev_valid_r;
+    reg [10:0]   ev_x0_r, ev_x1_r;
+    reg [19:0]   ev_len_r;
+    reg [20:0]   ev_sumx_r;
+    reg [9:0]    ev_y_r;
+    reg [1:0]    ev_cls_r;
+
+    integer qi;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            ev_valid_r <= 1'b0;
+            ev_x0_r    <= 11'd0;
+            ev_x1_r    <= 11'd0;
+            ev_len_r   <= 20'd0;
+            ev_sumx_r  <= 21'd0;
+            ev_y_r     <= 10'd0;
+            ev_cls_r   <= 2'b11;
+            for (qi = 0; qi < NEG; qi = qi + 1) begin
+                prv_lbl_r[qi] <= {LW{1'b0}};
+                ovl_hit_r[qi] <= 1'b0;
+            end
+        end else if (I_frame_done) begin
+            // ★ I_frame_done 一行末那拍（或紧随其后）出现，此处显式丢弃尚未消费的事件，
+            //   不把它带到下一帧：下一帧首拍 ev_valid_r=0 → 不消费 → 无残留。
+            ev_valid_r <= 1'b0;
+            ev_cls_r   <= 2'b11;
+            for (qi = 0; qi < NEG; qi = qi + 1) begin
+                prv_lbl_r[qi] <= {LW{1'b0}};
+                ovl_hit_r[qi] <= 1'b0;
+            end
+        end else begin
+            ev_valid_r <= ev_valid;
+            ev_x0_r    <= ev_x0;
+            ev_x1_r    <= ev_x1;
+            ev_len_r   <= ev_len;
+            ev_sumx_r  <= ev_sumx;
+            ev_y_r     <= ev_y;
+            ev_cls_r   <= ev_cls;
+            for (qi = 0; qi < NEG; qi = qi + 1) begin
+                prv_lbl_r[qi] <= prv_lbl_raw[qi];
+                ovl_hit_r[qi] <= ovl_hit_raw[qi];
+            end
+        end
+    end
+
+    //---- 下游统一使用寄存版（等价于原 prv_lbl / ovl_hit 延后一拍）----
+    wire [LW-1:0] prv_lbl [0:NEG-1];
+    wire          ovl_hit [0:NEG-1];
+    generate
+        for (gj = 0; gj < NEG; gj = gj + 1) begin : g_ovl_r
+            assign prv_lbl[gj] = prv_lbl_r[gj];
+            assign ovl_hit[gj] = ovl_hit_r[gj];
         end
     endgenerate
 
@@ -318,14 +425,18 @@ module conn_label #(
     wire          lbl_ok   = !(need_new && (lbl_next > {1'b0, CC_MAX}));
     wire [LW-1:0] fresh    = lbl_next[LW-1:0];
     wire [LW-1:0] lbl_use  = need_new ? fresh : min_lbl;
-    wire          ev_ok    = ev_valid && lbl_ok;
+    // ★ v1.5.2：门控 —— 只要求「事件有效 + label 未溢出」。
+    //   （曾试过再加 sec_first 抑制首拍，但那会误杀**同一行的第 2 个及以后的游程**，
+    //     因为 sec_first 是「本行首拍」而非「本帧首拍」。残留事件已由
+    //     frame_end 的 !ev_valid 条件 + I_frame_done 清 ev_valid_r 双重排除，无需再抑制。）
+    wire          ev_ok    = ev_valid_r && lbl_ok;
 
     //---- 等价合并：与 min_lbl 不同且重叠的 label → 并入 min_lbl ----
     integer mi;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (mi = 0; mi <= NEG; mi = mi + 1) eq[mi] <= mi[LW-1:0];
-        end else if (ev_valid && lbl_ok && !need_new) begin
+        end else if (ev_ok && !need_new) begin
             for (mi = 0; mi < NEG; mi = mi + 1)
                 if (ovl_hit[mi] && (prv_lbl[mi] != min_lbl))
                     eq[prv_lbl[mi]] <= min_lbl;
@@ -357,13 +468,13 @@ module conn_label #(
             for (mi = 0; mi <= NEG; mi = mi + 1) cls_lbl[mi] <= 2'b11;
         end else if (I_frame_done) begin
             for (mi = 0; mi <= NEG; mi = mi + 1) cls_lbl[mi] <= 2'b11;
-        end else if (ev_valid && lbl_ok) begin
+        end else if (ev_ok) begin
             if (need_new) begin
-                cls_lbl[fresh] <= ev_cls;                        // 新 label
+                cls_lbl[fresh] <= ev_cls_r;                      // 新 label
             end else begin
                 // ① 根未定色 → 用本游程色
-                if ((cls_lbl[min_lbl] == 2'b11) && (ev_cls != 2'b11))
-                    cls_lbl[min_lbl] <= ev_cls;
+                if ((cls_lbl[min_lbl] == 2'b11) && (ev_cls_r != 2'b11))
+                    cls_lbl[min_lbl] <= ev_cls_r;
                 // ② 被并入者未定色 → 继承根色（保证链式传递）
                 for (mi = 0; mi < NEG; mi = mi + 1)
                     if (ovl_hit[mi] && (prv_lbl[mi] != min_lbl)
@@ -372,7 +483,7 @@ module conn_label #(
                 // ③ 根与本游程都未知 → 从任一被并入者取色
                 for (mi = 0; mi < NEG; mi = mi + 1)
                     if (ovl_hit[mi] && (prv_lbl[mi] != min_lbl)
-                        && (cls_lbl[min_lbl] == 2'b11) && (ev_cls == 2'b11)
+                        && (cls_lbl[min_lbl] == 2'b11) && (ev_cls_r == 2'b11)
                         && (cls_lbl[prv_lbl[mi]] != 2'b11))
                         cls_lbl[min_lbl] <= cls_lbl[prv_lbl[mi]];
             end
@@ -415,13 +526,13 @@ module conn_label #(
                 acc_ymax[ai] <= 10'd0;
             end
         end else if (ev_ok) begin
-            acc_area[lbl_use] <= acc_area[lbl_use] + ev_len;
-            acc_sumx[lbl_use] <= acc_sumx[lbl_use] + {10'd0, ev_sumx};
-            acc_sumy[lbl_use] <= acc_sumy[lbl_use] + ({10'd0, ev_y} * {12'd0, ev_len});
-            if (ev_x0 < acc_xmin[lbl_use]) acc_xmin[lbl_use] <= ev_x0;
-            if (ev_x1 > acc_xmax[lbl_use]) acc_xmax[lbl_use] <= ev_x1;
-            if (ev_y  < acc_ymin[lbl_use]) acc_ymin[lbl_use] <= ev_y;
-            if (ev_y  > acc_ymax[lbl_use]) acc_ymax[lbl_use] <= ev_y;
+            acc_area[lbl_use] <= acc_area[lbl_use] + ev_len_r;
+            acc_sumx[lbl_use] <= acc_sumx[lbl_use] + {10'd0, ev_sumx_r};
+            acc_sumy[lbl_use] <= acc_sumy[lbl_use] + ({10'd0, ev_y_r} * {12'd0, ev_len_r});
+            if (ev_x0_r < acc_xmin[lbl_use]) acc_xmin[lbl_use] <= ev_x0_r;
+            if (ev_x1_r > acc_xmax[lbl_use]) acc_xmax[lbl_use] <= ev_x1_r;
+            if (ev_y_r  < acc_ymin[lbl_use]) acc_ymin[lbl_use] <= ev_y_r;
+            if (ev_y_r  > acc_ymax[lbl_use]) acc_ymax[lbl_use] <= ev_y_r;
         end
     end
 
@@ -430,7 +541,11 @@ module conn_label #(
     //=========================================================================
     reg [3:0] swap_wait;
     wire      de_fall = I_de_d && !I_de;
-    wire      do_swap = (swap_wait == 4'd1) && !ev_valid;
+    wire      do_swap = (swap_wait == 4'd1) && !ev_valid_r;
+    // ★ v1.5.2：do_swap 的抑制条件随「行间比对轮」整体延后一拍 —— 用 ev_valid_r
+    //   （而不是 ev_valid）。因为 ev_valid 那一拍事件还在「被流水寄存」，若此刻
+    //   就交换 bank，下一拍（ev_valid_r 生效拍）回放读到的就是已经换过的 bank/q，
+    //   事件被静默丢弃（首行首游程会漏统计）。用 ev_valid_r 可保时序也保正确性。
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -444,14 +559,18 @@ module conn_label #(
             wr_bank   <= 1'b0;
             swap_wait <= 4'd0;
         end else begin
-            if (de_fall) swap_wait <= 4'd2;   // ★ 必须在 hblank 内完成交换，
+            if (de_fall) swap_wait <= 4'd3;   // ★ 必须在 hblank 内完成交换，
                                               //   否则下一行 x=0 那一拍回放会用旧 cnt_rd
+                                              //   ★ v1.5.2：由 2 改 3 —— 整条行间比对通路
+                                              //   延后一拍后，行末最后游程（ev_valid=1、
+                                              //   即 de_fall 那一拍）需再等 1 拍才被消费完
+                                              //   （ev_valid_r 落回 0），故多留 1 拍余量。
             else if (swap_wait != 4'd0) swap_wait <= swap_wait - 4'd1;
 
             if (ev_ok) begin
                 if (cnt_wr < CC_MAX) begin
-                    rbuf_s[wr_base + cnt_wr] <= ev_x0;
-                    rbuf_e[wr_base + cnt_wr] <= ev_x1;
+                    rbuf_s[wr_base + cnt_wr] <= ev_x0_r;
+                    rbuf_e[wr_base + cnt_wr] <= ev_x1_r;
                     rbuf_l[wr_base + cnt_wr] <= need_new ? fresh : min_lbl;
                     cnt_wr <= cnt_wr + 6'd1;
                 end

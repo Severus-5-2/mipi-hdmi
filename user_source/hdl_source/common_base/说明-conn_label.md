@@ -337,7 +337,8 @@ conn_label #(
 |:---|:---|:---|
 | v1.4 | 2026-10-11 | 初版：RLE-CCL + 深度 32 等价表 + 帧末汇总 |
 | **v1.5.1** | 2026-10-11 | **面积优化（TD 综合 LUT 105,584 → 36,963，conn_label 77,949 → 36,544）**：<br>① `S_RSLV` 分时解析替代 33 份 `resolve_full` 内联<br>② `S_ADDM` 两拍流水消除 `tp[root[fs]]` 双重动态索引<br>③ **内部展开深度 `NEG` 32 → 8**（接口不变）<br>④ 归约树按 `NEG` 自适应；`verify_conn_label.py` 自动读 `NEG`<br>⑤ 修 `wr_base/rd_base` 硬编码 32 导致 NEG=8 时越界读 X 的 bug |
+| **v1.5.2** | 2026-10-11 | **时序优化（修 `Phy Opt not start` 的根因）**：<br>TD 综合后 `flow.status` 报 `Setup WNS -6386ps / TNS -4262099ps / 826 条违例`，**全部落在 `HDMI_PIXEL_CLK`(75MHz)**，最差路径 `u_conn_label/wr_bank_reg → acc_ymax_reg[*].ce`，20 级逻辑、`Data Path 19.652ns`（cell 32% / **net 68%**）、`Max Fanout 128 @ rd_base`。<br>① `rd_base` 由**组合推导改寄存器输出**（切掉 `wr_bank → 24 个读口地址` 的高扇出组合链）<br>② **`prv_lbl` / `ovl_hit` 插一级流水寄存**（`prv_lbl_r`/`ovl_hit_r`），把「DRAM读 + `resolve3` + 命中比较」与「归约树 → `lbl_use` → `acc_*` 写译码」切开<br>③ 事件字段（`ev_valid`/`ev_x0`/`ev_x1`/`ev_len`/`ev_sumx`/`ev_y`/`ev_cls`）**同步打一拍**（`*_r`），保证下游统计/等价/分类用的全是同一事件<br>④ 配套改：`ev_ok`、`eq`/`cls_lbl`/`acc_*`/`rbuf_*` 写、`cnt_wr` 全部门控改 `ev_valid_r`；`do_swap` 抑制条件改 `ev_valid_r`；`swap_wait` 行消隐余量 2 → 3 拍；`frame_end` 加 `&& !ev_valid` 避开行末残留事件<br>⑤ 回归：`conn` / `target_bus` / `top_chain` / `common` 四套 + `tb_crosscheck_zmc` **全部 PASS**（帧0 = 3 槽 36/32/16，与历史一致）<br>⑥ **教训**：曾用 `sec_first`「每行首拍」放行，误杀了同一行第 2 个及以后的游程 —— 残留事件其实已由 `frame_end` 的 `!ev_valid` + `I_frame_done` 清 `ev_valid_r` 双重排除，无需再抑制 |
 
 ---
 
-*文档生成：2026-10-11 ／ 最后更新：2026-10-11（v1.5.1）*
+*文档生成：2026-10-11 ／ 最后更新：2026-10-11（v1.5.2）*
