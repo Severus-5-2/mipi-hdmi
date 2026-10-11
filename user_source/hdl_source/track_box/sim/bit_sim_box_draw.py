@@ -41,12 +41,19 @@ DUMP = os.path.join(HERE, "tb_box_draw_out.txt")
 #    ★必须与 tb/tb_box_draw.v 顶部的 localparam 一字不差
 # ---------------------------------------------------------------------------
 TB_H_ACTIVE, TB_V_ACTIVE = 64, 32
+
+# ★ 2026-10-11：颜色改为「按 cls 上色」，不再按槽位序号。
+#   TB 里刻意让「槽号 ≠ cls」，用来抓 RTL 退回"按槽号上色"的回归。
+#     cls 编码：0=红 1=蓝 2=绿 3=未分类(黄)
+CLS2COLOR = {0: 0xFF0000, 1: 0x00A0FF, 2: 0x00FF00, 3: 0xFFF200}
+TB_CLS = [2, 0, 1, 3]          # 槽0→cls2(绿) 槽1→cls0(红) 槽2→cls1(蓝) 槽3→cls3(黄)
+
 TB_BOXES = [
-    # (x0, y0, x1, y1, color)
-    (4,  4,  20, 14, 0xFF0000),
-    (40, 4,  63, 14, 0x00FF00),
-    (4,  20, 20, 31, 0x00A0FF),
-    (28, 12, 44, 24, 0xFFF200),
+    # (x0, y0, x1, y1, cls)  ← 第 5 项是 cls，不是颜色
+    (4,  4,  20, 14, 2),
+    (40, 4,  63, 14, 0),
+    (4,  20, 20, 31, 1),
+    (28, 12, 44, 24, 3),
 ]
 TB_CR_X, TB_CR_Y, TB_CR_HALF = 36, 18, 5
 TB_COLOR_CROSS = 0xFFFFFF
@@ -98,13 +105,17 @@ def cross_hit(x, y, cx, cy, half, w=2):
 
 
 def overlay_color(x, y, boxes, cr, border_w=2, color_cross=0xFFFFFF):
-    """返回该像素应叠加的颜色，0 表示不叠加。优先级：准星 > B0 > B1 > B2 > B3。"""
+    """返回该像素应叠加的颜色，0 表示不叠加。优先级：准星 > B0 > B1 > B2 > B3。
+
+    ★ 2026-10-11：boxes 的第 5 项是 **cls**（颜色类别），颜色由 CLS2COLOR 查表，
+      不再直接用第 5 项当颜色。这与 RTL 的 cls2color() 语义一致。
+    """
     cx, cy, half = cr
     if cross_hit(x, y, cx, cy, half):
         return color_cross
-    for (x0, y0, x1, y1, color) in boxes:
+    for (x0, y0, x1, y1, cls) in boxes:
         if border_hit(x, y, x0, y0, x1, y1, border_w):
-            return color
+            return CLS2COLOR.get(cls, CLS2COLOR[3])
     return 0
 
 
@@ -114,10 +125,10 @@ def render(boxes, cr, w, h, color_cross=0xFFFFFF, scale_x=8, scale_y=16):
     rows = (h + scale_y - 1) // scale_y
     grid = [[" "] * cols for _ in range(rows)]
 
-    # 先铺框（按颜色区分字符），再铺准星（'+'），准星优先
-    glyph = {0xFF0000: "0", 0x00FF00: "1", 0x00A0FF: "2", 0xFFF200: "3"}
-    for (x0, y0, x1, y1, color) in boxes:
-        ch = glyph.get(color, "#")
+    # 先铺框（按 cls 决定颜色字符），再铺准星（'+'），准星优先
+    glyph = {0xFF0000: "0", 0x00A0FF: "2", 0x00FF00: "1", 0xFFF200: "3"}
+    for (x0, y0, x1, y1, cls) in boxes:
+        ch = glyph.get(CLS2COLOR.get(cls, CLS2COLOR[3]), "#")
         for y in range(y0, y1 + 1):
             for x in range(x0, x1 + 1):
                 if border_hit(x, y, x0, y0, x1, y1):
@@ -184,7 +195,7 @@ def check():
     print()
     print("  结构检查（边框恰好 2px、退化框不画、且不得越出框外）：")
     structural_ok = True
-    for i, (x0, y0, x1, y1, color) in enumerate(TB_BOXES):
+    for i, (x0, y0, x1, y1, cls) in enumerate(TB_BOXES):
         w = x1 - x0 + 1
         h = y1 - y0 + 1
         # 上边 2 行全宽 + 下边 2 行全宽 + 左右各 2 列 x (h-4) 行

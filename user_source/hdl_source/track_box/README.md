@@ -65,6 +65,10 @@ user_source/hdl_source/track_box/
  全部 PASS
 ```
 
+> ★ 2026-10-11：TB 已适配新增端口 `I_box_cls`，并**刻意让「槽号 ≠ cls」**
+> （槽0→cls2绿 / 槽1→cls0红 / 槽2→cls1蓝 / 槽3→cls3黄）。
+> 若 RTL 退回「按槽号硬编码颜色」，本 TB 立即报错 —— 见 §四点五。
+
 ### 3. `sim/bit_sim_box_draw.py check`（TB dump vs 第三方独立模型）
 
 ```
@@ -75,6 +79,9 @@ user_source/hdl_source/track_box/
  框3 (28,12)-(44,24): 全画面命中 104 / 解析式 104 / 越界 0  [PASS]
  三份实现（RTL / TB 模型 / 本脚本）结果完全一致。
 ```
+
+> ★ 同日：第三方脚本的颜色模型也改成 `CLS2COLOR` 查表（与 RTL 的 `cls2color()` 同构），
+> `TB_BOXES` 第 5 项语义由「颜色」改为「cls」。
 
 ### 4. `sim/bit_sim_osd_coord.py`（端到端：数值 → 屏幕字形）
 

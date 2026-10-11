@@ -262,6 +262,7 @@ module design_top_wrapper (
     wire                  S_target_update;
 
     wire [3:0]  S_box_valid;                // 目标总线展开 → box_draw
+    wire [7:0]  S_box_cls;                  // ★每槽 2bit 类别 → box_draw 按颜色画框
     wire [43:0] S_box_xmin, S_box_xmax;
     wire [39:0] S_box_ymin, S_box_ymax;
 
@@ -1022,7 +1023,15 @@ isp_top u_isp_top (
     );
 
     box_draw #(
-        .SELF_TEST ( 0 )        // ★D4：1→0，改画真实检测目标（原 1 = 固定标定框）
+        .SELF_TEST ( 0 ),       // ★D4：1→0，改画真实检测目标（原 1 = 固定标定框）
+        // ★2026-10-11：按「颜色类别」上色，而不是按「槽位序号」上色。
+        //   原实现槽0红/槽1绿/槽2蓝/槽3黄 —— 但 conn_features 是「面积降序」排槽，
+        //   槽号不代表颜色，现场表现为「蓝色物体也画红框」。
+        //   cls 编码（common_defs.vh / conn_label）：0=红 1=蓝 2=绿 3=未分类
+        .COLOR_CLS0 ( 24'hff0000 ),   // 红
+        .COLOR_CLS1 ( 24'h00a0ff ),   // 蓝
+        .COLOR_CLS2 ( 24'h00ff00 ),   // 绿
+        .COLOR_CLS3 ( 24'hfff200 )    // 未分类 → 黄（提示：检测到了但没分出颜色）
     )u_box_draw(
         .I_clk       ( S_hdmi_pixel_clk ),
         .I_rst_n     ( S_hdmi_rst_n     ),
@@ -1030,6 +1039,7 @@ isp_top u_isp_top (
         .I_pix_x     ( S_pix_x          ),
         .I_pix_y     ( S_pix_y          ),
         .I_box_valid ( S_box_valid      ),   // ← conn_features 目标总线（4 槽展开）
+        .I_box_cls   ( S_box_cls        ),   // ← 每槽 2bit 颜色类别
         .I_box_xmin  ( S_box_xmin       ),
         .I_box_xmax  ( S_box_xmax       ),
         .I_box_ymin  ( S_box_ymin       ),
@@ -1073,7 +1083,17 @@ isp_top u_isp_top (
         .IMG_WIDTH  ( 1280 ),
         .IMG_HEIGHT ( 720  ),
         .PIPE_DELAY ( 0    ),   // S_video_sat 与 S_hdmi_de 同拍
-        .PIX_DLY    ( 2    )    // 接 S_pix_x_2d / S_pix_y_2d
+        .PIX_DLY    ( 2    ),   // 接 S_pix_x_2d / S_pix_y_2d
+        // ★ 2026-10-11 v2：曝光自适应色相判据（修「低曝光检测不全 / 掩膜时有时无」）
+        //   根因：目标变暗 ⇒ 色差按比例缩小 ⇒ 逃出固定绝对窗口（绿块 60% 亮度就崩）。
+        //   处置：改为以 (128,128) 为原点的「方向 + 幅度」判据，对整体亮度缩放免疫。
+        //   实测：35% 亮度下红/蓝/绿全部 1.00 检出（原来 0.14/0.11/0.00），
+        //         干扰色误判率 5.7% → 1.1%。详见 detect_color_mask.v 参数区注释。
+        .MAG_TH     ( 8'd16   ),
+        .RATIO10    ( 5'd13   ),
+        // 若现场光仍然不足，把 MAG_TH 往下调（14 → 12 → 10），逐级试；
+        // 若误检（把橙色/肤色当红）太多，把 MAG_TH 往上调（18 → 20）。
+        .USE_ABS_WINDOW ( 0   )
     )u_detect_color_mask(
         .clk        ( S_hdmi_pixel_clk ),
         .rst_n      ( S_hdmi_rst_n     ),
@@ -1182,6 +1202,9 @@ isp_top u_isp_top (
             assign S_box_xmax[11*gbox +: 11] = sl[`TGT_O_XMAX +: 11];
             assign S_box_ymin[10*gbox +: 10] = sl[`TGT_O_YMIN +: 10];
             assign S_box_ymax[10*gbox +: 10] = sl[`TGT_O_YMAX +: 10];
+            // ★ 2026-10-11：cls 也要传下去 —— 否则 box_draw 只能按槽号猜颜色，
+            //   现场表现为「蓝物体也画红框」（槽号是面积降序，不代表颜色）。
+            assign S_box_cls[2*gbox +: 2]    = sl[`TGT_O_CLS +: 2];
         end
     endgenerate
 

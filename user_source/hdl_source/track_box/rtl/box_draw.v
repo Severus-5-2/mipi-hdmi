@@ -42,6 +42,14 @@ module box_draw #(
     parameter integer SELF_TEST  = 1,
     parameter integer BORDER_W   = 2,
     parameter integer CROSS_HALF = 16,
+    // ---- ★ 2026-10-11 v2：颜色改为「按 cls 选」----
+    //  原来按槽位序号硬编码（COLOR_BOX0..3），现按目标真实颜色 cls 选。
+    //  保留 4 个 COLOR_CLS* 参数名以便现场微调（调这三个即可换框色）。
+    parameter [23:0]  COLOR_CLS0  = 24'hff0000,   // cls=0 红 → 红框
+    parameter [23:0]  COLOR_CLS1  = 24'h00a0ff,   // cls=1 蓝 → 蓝框（B 通道高位，视觉偏亮蓝）
+    parameter [23:0]  COLOR_CLS2  = 24'h00ff00,   // cls=2 绿 → 绿框
+    parameter [23:0]  COLOR_CLS3  = 24'hfff200,   // cls=3 未分类 → 黄（与 OSD 文字同色）
+    // 兼容别名（SELF_TEST=1 的固定标定框仍按槽号上色，沿用旧的 4 色）
     parameter [23:0]  COLOR_BOX0  = 24'hff0000,   // 红
     parameter [23:0]  COLOR_BOX1  = 24'h00ff00,   // 绿
     parameter [23:0]  COLOR_BOX2  = 24'h00a0ff,   // 蓝
@@ -62,6 +70,14 @@ module box_draw #(
     input  wire [4*11-1:0]  I_box_xmax,
     input  wire [4*10-1:0]  I_box_ymin,
     input  wire [4*10-1:0]  I_box_ymax,
+
+    // ---- ★ 2026-10-11 新增：每框的真实颜色类别（`CLS_RED/BLUE/GREEN/UNKNOWN`）----
+    //   背景：原实现把框色按**槽位序号**硬编码（槽0红/槽1绿/槽2蓝/槽3黄），
+    //         与目标真实颜色无关 ⇒ 现场出现「蓝物体也被画成红框」。
+    //         因为 conn_features 是按**面积降序**排槽的，槽号不代表颜色。
+    //   现改为按 cls 选色。cls 编码（common_defs.vh §2）：
+    //         2'd0 = 红  2'd1 = 蓝  2'd2 = 绿  2'd3 = 未分类
+    input  wire [4*2-1:0]   I_box_cls,      // [1:0] 第 0 框，[3:2] 第 1 框 ...
 
     // ---- 十字准星 ----
     input  wire        I_cross_en,
@@ -208,9 +224,31 @@ module box_draw #(
     // 5. 优先级 + 寄存（第 1 拍拍末）
     //    优先级：十字准星 > B0 > B1 > B2 > B3
     //    （准星只有 2px 宽，压在最上层才不会被框边盖住）
+    //
+    //    ★ 2026-10-11 v2：颜色改为**按该框自己的 cls 选**，不再按槽位序号。
+    //      这样「蓝物体」画蓝框、「绿物体」画绿框，与面积降序排槽解耦。
+    //      SELF_TEST=1 时沿用旧的按槽号颜色（标定框无 cls 语义）。
     //==================================================================
     reg        S_hit_r;
     reg [23:0] S_color_r;
+
+    // 每槽的 cls → 颜色
+    function [23:0] cls2color;
+        input [1:0] c;
+        begin
+            case (c)
+                2'd0:    cls2color = COLOR_CLS0;   // 红
+                2'd1:    cls2color = COLOR_CLS1;   // 蓝
+                2'd2:    cls2color = COLOR_CLS2;   // 绿
+                default: cls2color = COLOR_CLS3;   // 未分类 → 黄
+            endcase
+        end
+    endfunction
+
+    wire [23:0] W_COL0 = SELF_TEST ? COLOR_BOX0 : cls2color(I_box_cls[0*2 +: 2]);
+    wire [23:0] W_COL1 = SELF_TEST ? COLOR_BOX1 : cls2color(I_box_cls[1*2 +: 2]);
+    wire [23:0] W_COL2 = SELF_TEST ? COLOR_BOX2 : cls2color(I_box_cls[2*2 +: 2]);
+    wire [23:0] W_COL3 = SELF_TEST ? COLOR_BOX3 : cls2color(I_box_cls[3*2 +: 2]);
 
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
@@ -224,19 +262,19 @@ module box_draw #(
             end
             else if(B0_HIT) begin
                 S_hit_r   <= 1'b1;
-                S_color_r <= COLOR_BOX0;
+                S_color_r <= W_COL0;
             end
             else if(B1_HIT) begin
                 S_hit_r   <= 1'b1;
-                S_color_r <= COLOR_BOX1;
+                S_color_r <= W_COL1;
             end
             else if(B2_HIT) begin
                 S_hit_r   <= 1'b1;
-                S_color_r <= COLOR_BOX2;
+                S_color_r <= W_COL2;
             end
             else if(B3_HIT) begin
                 S_hit_r   <= 1'b1;
-                S_color_r <= COLOR_BOX3;
+                S_color_r <= W_COL3;
             end
             else begin
                 S_hit_r   <= 1'b0;

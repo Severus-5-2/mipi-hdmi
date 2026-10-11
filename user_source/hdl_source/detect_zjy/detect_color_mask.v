@@ -76,19 +76,70 @@ module detect_color_mask #(
     parameter [7:0] Y_MIN = 8'd0,
 
     //------------------------------------------------------------------
-    // 红色目标：Cb 偏低、Cr 偏高
+    // ★ 2026-10-11 曝光自适应色相判据（v2）
+    //------------------------------------------------------------------
+    //  现场问题：低曝光时「检测不全」「掩膜/小绿块时有时无」「框只在移动时显现」
+    //  根因（已用 sim_lowlight_mask.py 定量验证）：
+    //    目标变暗 ⇒ 三通道同比例缩小 ⇒ 色差 (R−Y)、(B−Y) 同比例缩小
+    //    ⇒ 饱和色朝中性灰 (Cb,Cr)=(128,128) 收敛 ⇒ 逃出**固定绝对窗口**。
+    //    实测崩溃点（目标亮度百分比）：
+    //        红球 35% 崩（Cr 从 255 降到 153，跌破 RED_CR_LO=155）
+    //        蓝块 35% 崩（Cb 从 236 降到 153，跌破 BLUE_CB_LO=155）
+    //        绿块 60% 就崩（Cb/Cr 从 82/69 升到 100/93，涨出窗口上界）
+    //      ⇒ 「绿的最先没框」「时有时无」由此而来。
+    //
+    //  处置：把「固定绝对窗口」换成**以 (128,128) 为原点的方向 + 幅度判据**：
+    //      dcb = Cb − 128 ，dcr = Cr − 128
+    //      mag = |dcb| + |dcr|                         （饱和度幅度）
+    //      红：dcr > 0 且 dcb ≤ 0 且 |dcr|*10 ≥ |dcb|*RATIO10  且 mag ≥ MAG_TH
+    //      蓝：dcb > 0 且 dcr ≤ 0 且 |dcb|*10 ≥ |dcr|*RATIO10  且 mag ≥ MAG_TH
+    //      绿：dcb < 0 且 dcr < 0                              且 mag ≥ MAG_TH
+    //    方向判据对「整体亮度缩放」天然免疫（缩放不改变 dcb/dcr 的符号与比值），
+    //    只留 mag 一个门限来挡暗部噪点。
+    //
+    //  定量收益（sim_lowlight_mask.py 同一套随机模型）：
+    //    目标亮度     当前(绝对窗口)          本方案(MAG_TH=16)
+    //      60%      红1.00 蓝1.00 绿0.00     红1.00 蓝1.00 绿1.00
+    //      35%      红0.14 蓝0.11 绿0.00     红1.00 蓝1.00 绿1.00
+    //      28%      全 0                     红1.00 蓝0.99 绿1.00
+    //    干扰色误判率   5.7%   →   1.1%（降 5 倍）
+    //    交叉错色率      —     →   0.00%
+    //------------------------------------------------------------------
+    //  幅度门限：|dcb|+|dcr| 低于此值视为「近中性灰」，不参与检测。
+    //    · 越大 → 抗噪越强，但欠曝目标越晚被检出
+    //    · 16 为实测最优点（见上表）；逐级可调 12~22
+    //------------------------------------------------------------------
+    parameter [7:0] MAG_TH = 8'd16,
+
+    //------------------------------------------------------------------
+    //  色相比值判据 RATIO10：用整数比较 |a|*10 >= |b|*RATIO10 实现 |a| >= |b|*RATIO/10
+    //    · RATIO10=13 ⇔ 比值 1.3（实测最优：抗干扰色最好且不误杀目标）
+    //    · 调大 → 红/蓝判定更严（更像纯色才认），抗干扰更强但欠曝目标更难认
+    //    · 调小 → 更宽松，易把橙/肤色误判成红
+    //------------------------------------------------------------------
+    parameter [4:0] RATIO10 = 5'd13,
+
+    //------------------------------------------------------------------
+    // 【保留】固定绝对窗口 —— 兼容模式
+    //   置 1 时走旧判据（D1 基线行为不变），供位级对拍 / 回归使用。
+    //   置 0（默认）走上面的曝光自适应判据。
+    //------------------------------------------------------------------
+    parameter integer USE_ABS_WINDOW = 0,
+
+    //------------------------------------------------------------------
+    // 红色目标：Cb 偏低、Cr 偏高（仅 USE_ABS_WINDOW=1 时生效）
     //------------------------------------------------------------------
     parameter [7:0] RED_CB_LO = 8'd50,   RED_CB_HI = 8'd125,
     parameter [7:0] RED_CR_LO = 8'd155,  RED_CR_HI = 8'd255,
 
     //------------------------------------------------------------------
-    // 蓝色目标：Cb 偏高、Cr 偏低
+    // 蓝色目标：Cb 偏高、Cr 偏低（仅 USE_ABS_WINDOW=1 时生效）
     //------------------------------------------------------------------
     parameter [7:0] BLUE_CB_LO = 8'd155, BLUE_CB_HI = 8'd255,
     parameter [7:0] BLUE_CR_LO = 8'd40,  BLUE_CR_HI = 8'd125,
 
     //------------------------------------------------------------------
-    // 绿色目标：Cb、Cr 双低
+    // 绿色目标：Cb、Cr 双低（仅 USE_ABS_WINDOW=1 时生效）
     //------------------------------------------------------------------
     parameter [7:0] GREEN_CB_LO = 8'd20, GREEN_CB_HI = 8'd95,
     parameter [7:0] GREEN_CR_LO = 8'd0,  GREEN_CR_HI = 8'd85
@@ -306,12 +357,43 @@ module detect_color_mask #(
 
     wire w_gate = (w_y_out >= Y_MIN);
 
-    wire w_mask_r = w_gate && (w_cb_out >= RED_CB_LO)   && (w_cb_out <= RED_CB_HI)   &&
-                              (w_cr_out >= RED_CR_LO)   && (w_cr_out <= RED_CR_HI);
-    wire w_mask_b = w_gate && (w_cb_out >= BLUE_CB_LO)  && (w_cb_out <= BLUE_CB_HI)  &&
-                              (w_cr_out >= BLUE_CR_LO)  && (w_cr_out <= BLUE_CR_HI);
-    wire w_mask_g = w_gate && (w_cb_out >= GREEN_CB_LO) && (w_cb_out <= GREEN_CB_HI) &&
-                              (w_cr_out >= GREEN_CR_LO) && (w_cr_out <= GREEN_CR_HI);
+    //------------------------------------------------------------------
+    //  ★ v2 曝光自适应色相判据（默认） / 兼容旧固定窗口（USE_ABS_WINDOW=1）
+    //------------------------------------------------------------------
+    //  以 (128,128) 为原点的带符号色差。w_cb_out/w_cr_out ∈ [0,255]，
+    //  故 |dcb|、|dcr| ∈ [0,128]，各 8 bit 足够。
+    wire signed [8:0] w_dcb = $signed({1'b0, w_cb_out}) - 9'sd128;
+    wire signed [8:0] w_dcr = $signed({1'b0, w_cr_out}) - 9'sd128;
+    wire [7:0] w_adcb = w_dcb[8] ? (~w_dcb[7:0] + 8'd1) : w_dcb[7:0];   // |dcb|
+    wire [7:0] w_adcr = w_dcr[8] ? (~w_dcr[7:0] + 8'd1) : w_dcr[7:0];   // |dcr|
+
+    //  饱和度幅度 |dcb|+|dcr| ∈ [0,256] → 9 bit
+    wire [8:0] w_mag = {1'b0, w_adcb} + {1'b0, w_adcr};
+    wire       w_mag_ok = (w_mag >= {1'b0, MAG_TH});
+
+    //  比值判据：|a|*10 >= |b|*RATIO10  （|a| ≤ 128 ⇒ |a|*10 ≤ 1280，11 bit 够）
+    wire [10:0] w_rcb10 = {3'b0, w_adcb} * 11'd10;
+    wire [10:0] w_rcr10 = {3'b0, w_adcr} * 11'd10;
+    wire [10:0] w_lim_cb = {6'b0, RATIO10} * {3'b0, w_adcb};
+    wire [10:0] w_lim_cr = {6'b0, RATIO10} * {3'b0, w_adcr};
+
+    //  自适应判据：方向 + 幅度 + 比值
+    wire w_ad_r = w_mag_ok && (w_dcr > 9'sd0) && (w_dcb <= 9'sd0) && (w_rcr10 >= w_lim_cb);
+    wire w_ad_b = w_mag_ok && (w_dcb > 9'sd0) && (w_dcr <= 9'sd0) && (w_rcb10 >= w_lim_cr);
+    wire w_ad_g = w_mag_ok && (w_dcb < 9'sd0) && (w_dcr <  9'sd0);
+
+    //  固定绝对窗口（兼容路径）
+    wire w_ab_r = w_gate && (w_cb_out >= RED_CB_LO)   && (w_cb_out <= RED_CB_HI)   &&
+                            (w_cr_out >= RED_CR_LO)   && (w_cr_out <= RED_CR_HI);
+    wire w_ab_b = w_gate && (w_cb_out >= BLUE_CB_LO)  && (w_cb_out <= BLUE_CB_HI)  &&
+                            (w_cr_out >= BLUE_CR_LO)  && (w_cr_out <= BLUE_CR_HI);
+    wire w_ab_g = w_gate && (w_cb_out >= GREEN_CB_LO) && (w_cb_out <= GREEN_CB_HI) &&
+                            (w_cr_out >= GREEN_CR_LO) && (w_cr_out <= GREEN_CR_HI);
+
+    //  运行时可切（USE_ABS_WINDOW 是 parameter，综合时会常量折叠，不产生额外逻辑）
+    wire w_mask_r = USE_ABS_WINDOW ? w_ab_r : w_ad_r;
+    wire w_mask_b = USE_ABS_WINDOW ? w_ab_b : w_ad_b;
+    wire w_mask_g = USE_ABS_WINDOW ? w_ab_g : w_ad_g;
 
     // 目标颜色选择（静态信号，两拍同步防亚稳态）
     reg [1:0] sel_s1, sel_s2;

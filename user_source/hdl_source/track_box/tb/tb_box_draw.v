@@ -17,6 +17,7 @@
 //    1) pix_coord_gen：de 有效时 O_pix_x/O_pix_y 是否恒等于真实 (列, 行)
 //       —— 这是 D1「验证坐标系统」的可执行证据；
 //    2) box_draw：O_hit/O_color 是否与 TB 内独立写成的期望模型逐像素一致；
+//       ★ 颜色按 cls 索引（TB 里故意让槽号 ≠ cls，用于抓"按槽号上色"回归）；
 //       并把整帧叠加 dump 到 sim/tb_box_draw_out.txt，
 //       交由 sim/bit_sim_box_draw.py 做第三方比对（三份实现互证）。
 //
@@ -47,11 +48,20 @@ module tb_box_draw;
     localparam integer CR_X  = 36, CR_Y  = 18;
     localparam integer CR_HALF = 5;
 
-    localparam [23:0] C_BOX0  = 24'hff0000;
-    localparam [23:0] C_BOX1  = 24'h00ff00;
-    localparam [23:0] C_BOX2  = 24'h00a0ff;
-    localparam [23:0] C_BOX3  = 24'hfff200;
+    // ★ 2026-10-11：颜色改为「按 cls 上色」，不再按槽位序号。
+    //   本 TB 刻意让「槽号 ≠ cls」——若 RTL 还在按槽号上色，下面立刻会报错。
+    //   槽0 → cls=2(绿)   槽1 → cls=0(红)   槽2 → cls=1(蓝)   槽3 → cls=3(黄)
+    localparam [23:0] C_CLS0 = 24'hff0000;   // 红
+    localparam [23:0] C_CLS1 = 24'h00a0ff;   // 蓝
+    localparam [23:0] C_CLS2 = 24'h00ff00;   // 绿
+    localparam [23:0] C_CLS3 = 24'hfff200;   // 未分类 → 黄
     localparam [23:0] C_CROSS = 24'hffffff;
+
+    // 用别名指向 cls 颜色：C_BOX0/1/2/3 = 槽0/1/2/3 实际该显示的颜色
+    localparam [23:0] C_BOX0 = C_CLS2;   // 槽0 cls=2 → 绿
+    localparam [23:0] C_BOX1 = C_CLS0;   // 槽1 cls=0 → 红
+    localparam [23:0] C_BOX2 = C_CLS1;   // 槽2 cls=1 → 蓝
+    localparam [23:0] C_BOX3 = C_CLS3;   // 槽3 cls=3 → 黄
 
     //==================================================================
     // 1. 时钟 / 复位
@@ -128,6 +138,8 @@ module tb_box_draw;
     //    使用方式一致。
     //==================================================================
     reg [3:0]      S_box_valid = 4'b1111;
+    // ★ 槽号与 cls 刻意错开（见 C_BOX* 注释），用来抓「按槽号上色」的回归
+    reg [7:0]      S_box_cls   = {2'd3, 2'd1, 2'd0, 2'd2};
     reg [4*11-1:0] S_box_xmin  = {11'd28, 11'd4,  11'd40, 11'd4 };
     reg [4*11-1:0] S_box_xmax  = {11'd44, 11'd20, 11'd63, 11'd20};
     reg [4*10-1:0] S_box_ymin  = {10'd12, 10'd20, 10'd4,  10'd4 };
@@ -141,6 +153,12 @@ module tb_box_draw;
         .SELF_TEST   ( 0       ),
         .BORDER_W    ( 2       ),
         .CROSS_HALF  ( CR_HALF ),
+        // ★ 按 cls 上色（SELF_TEST=0 时生效）
+        .COLOR_CLS0  ( C_CLS0  ),
+        .COLOR_CLS1  ( C_CLS1  ),
+        .COLOR_CLS2  ( C_CLS2  ),
+        .COLOR_CLS3  ( C_CLS3  ),
+        // 兼容别名（SELF_TEST=1 时才用）
         .COLOR_BOX0  ( C_BOX0  ),
         .COLOR_BOX1  ( C_BOX1  ),
         .COLOR_BOX2  ( C_BOX2  ),
@@ -153,6 +171,7 @@ module tb_box_draw;
         .I_pix_x     ( S_pix_x     ),
         .I_pix_y     ( S_pix_y     ),
         .I_box_valid ( S_box_valid ),
+        .I_box_cls   ( S_box_cls   ),
         .I_box_xmin  ( S_box_xmin  ),
         .I_box_xmax  ( S_box_xmax  ),
         .I_box_ymin  ( S_box_ymin  ),
