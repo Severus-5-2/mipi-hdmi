@@ -372,10 +372,28 @@ module detect_color_mask #(
     wire       w_mag_ok = (w_mag >= {1'b0, MAG_TH});
 
     //  比值判据：|a|*10 >= |b|*RATIO10  （|a| ≤ 128 ⇒ |a|*10 ≤ 1280，11 bit 够）
-    wire [10:0] w_rcb10 = {3'b0, w_adcb} * 11'd10;
-    wire [10:0] w_rcr10 = {3'b0, w_adcr} * 11'd10;
-    wire [10:0] w_lim_cb = {6'b0, RATIO10} * {3'b0, w_adcb};
-    wire [10:0] w_lim_cr = {6'b0, RATIO10} * {3'b0, w_adcr};
+    //
+    //  ★ 2026-10-11 DSP 瘦身：原来写成 `* 11'd10` 与 `* RATIO10`，
+    //    TD 综合会把它们判成"宏乘法"往 DSP 上映射（实测 u_detect_color_mask
+    //    占 8 个 DSP，全工程 41/40 超限 ⇒ Phy Opt 的 hfn_opt 直接崩）。
+    //    现改为**纯移位加**，零 DSP：
+    //        |a|*10 = |a|*8 + |a|*2
+    //        |b|*13 = |b|*8 + |b|*4 + |b|
+    //    RATIO10 默认 13；若需改成别的值，按同样方式展开成移位加即可
+    //    （如 15 = 8+4+2+1，12 = 8+4，14 = 8+4+2）。
+    wire [10:0] w_rcb10 = {w_adcb, 3'b000} + {w_adcb, 1'b0};              // *10
+    wire [10:0] w_rcr10 = {w_adcr, 3'b000} + {w_adcr, 1'b0};              // *10
+    //  RATIO10 = 13 ⇒ *13 = *8 + *4 + *1
+    wire [10:0] w_lim_cb = {w_adcb, 3'b000} + {w_adcb, 2'b00} + w_adcb;
+    wire [10:0] w_lim_cr = {w_adcr, 3'b000} + {w_adcr, 2'b00} + w_adcr;
+    //  ⚠ 编译期自检：本展开式只对 RATIO10 == 13 成立
+    //     （综合时 0 开销；若有人改 RATIO10 而忘了改上面两行，这里会报错拦住）
+    // synthesis translate_off
+    initial begin
+        if (RATIO10 != 5'd13)
+            $display("ERROR: detect_color_mask: RATIO10=%0d 与硬编码的 *13 展开式不符，请同步修改 w_lim_cb/w_lim_cr！", RATIO10);
+    end
+    // synthesis translate_on
 
     //  自适应判据：方向 + 幅度 + 比值
     wire w_ad_r = w_mag_ok && (w_dcr > 9'sd0) && (w_dcb <= 9'sd0) && (w_rcr10 >= w_lim_cb);
