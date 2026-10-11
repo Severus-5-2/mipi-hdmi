@@ -67,6 +67,8 @@ __pycache__/
 *.vcd
 *_result.txt
 *.vvp
+# 位级对拍 dump（verify_*.py 可重新生成；pattern*.hex 为激励，需入库）
+user_source/hdl_source/common_base/sim/*_out*.txt
 
 # ===== 过程产物：数据手册文本抽取（可重新生成，且有版权风险）=====
 user_source/hdl_source/gamma_fix/refs/

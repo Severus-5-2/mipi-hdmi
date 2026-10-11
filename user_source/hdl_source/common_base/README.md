@@ -18,9 +18,10 @@ common_base/
 ├── common_defs.vh         全局常量、位宽、接口位域（★ 接口宪法）
 ├── ycbcr_convert.v        RGB888 → YCbCr（§1.1，位级复用 chroma_denoise）
 ├── target_bus.v           目标列表总线打包/解包（§4：艺 → 晨）
-├── conn_label.v           [待建] 游程法连通域（D2，张金艺主导）
-├── conn_features.v        [待建] 帧末特征统计：面积/Σx/Σy/bbox
-└── div_shift_sub.v        [待建] 移位-减法除法器（消隐期质心除法）
+├── conn_label.v           [✅ 完成] 4 连通 RLE-CCL 连通域标注（每像素 label 流 + 帧末汇总 + 颜色 cls）
+├── conn_features.v        [✅ 完成] 帧末汇总 → 面积降序前 4 → target_bus 384bit
+├── tb_*.v / verify_*.py   [✅ 完成] 位级对拍（conn_label / target_bus / top_color_chain）
+└── （质心除法已内置于 conn_label.v，不再单列 div_shift_sub.v）
 ```
 
 > ⚠️ **2026-10-10 修订（对账后）**：坐标计数器**不放在本目录**。
@@ -98,13 +99,14 @@ iverilog -g2005 -I user_source/hdl_source/common_base \
 | 2026-10-10 | 张金艺 | 首版建立：`common_defs.vh` / `pix_counter.v` / `ycbcr_convert.v` / `target_bus.v` | 待确认 |
 | 2026-10-10 | 张金艺 | 对账后修订：坐标源改用张铭晨 `pix_coord_gen.v`，`pix_counter.v` 删除；明确「保留但避重」原则 | 待确认 |
 | 2026-10-10 | 张金艺 | 第二轮对账核实：清理 README 编译命令等 3 处 `pix_counter` 残留；同步清 `协作规范-代码一致性.md` 4 处 | 待确认 |
+| 2026-10-11 | 张金艺 | D2–D4 完成：交付 `conn_label.v`（4 连通 RLE-CCL + 每像素 label 流 + 帧末汇总/质心 + 颜色 `cls`）与 `conn_features.v`（面积降序前 4 → `target_bus`）；三套位级对拍全通过；质心除法内置于 `conn_label.v`，不单列 `div_shift_sub.v` | 待确认 |
 
 ---
 
-## 待建模块排期
+## 模块状态（D2–D4 已完成）
 
-| 模块 | 里程碑 | 主导 | 说明 |
-|:---|:---|:---|:---|
-| `conn_label.v` | D2–D4 | 张金艺 | 行内 RLE + 行间并查表 + 深度 32 等价表。**张铭晨的运动检测强依赖此模块** |
-| `conn_features.v` | D2–D4 | 张金艺 | 帧末统计 area / Σx / Σy / bbox |
-| `div_shift_sub.v` | D4 | 张金艺 | vsync 消隐期移位-减法除法，算质心 |
+| 模块 | 状态 | 主导 | 说明 |
+|:---|:---:|:---|:---|
+| `conn_label.v` | ✅ 完成 | 张金艺 | 4 连通 RLE-CCL + 每像素 label 流 + 帧末汇总（含质心除法）+ 颜色 `cls`。**张铭晨的运动检测复用此模块**（`I_color` 接 `2'b11` 即退化为未分类） |
+| `conn_features.v` | ✅ 完成 | 张金艺 | 面积降序前 4 擂台 → `target_bus` 384bit |
+| 质心除法 | ✅ 完成 | 张金艺 | 已内置于 `conn_label.v`（31 步移位-减法），不再单列 `div_shift_sub.v` |

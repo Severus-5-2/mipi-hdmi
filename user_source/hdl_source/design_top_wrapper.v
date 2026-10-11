@@ -1,5 +1,7 @@
 
 
+`include "common_defs.vh"
+
 module design_top_wrapper (
     input wire        I_sys_clk,
     input wire        I_rst_n,
@@ -235,6 +237,33 @@ module design_top_wrapper (
     wire [23:0] S_mask_color;      // 预留：掩膜颜色
     wire        S_ovl_hit;         // 仲裁结果 → hdmi_mixer.I_ext_hit
     wire [23:0] S_ovl_color;       // 仲裁结果 → hdmi_mixer.I_ext_color
+
+    //===== 张金艺 D2/D4：连通域标注 + 特征汇总 → 目标总线 =====
+    wire        S_det_de, S_det_fdone;      // detect_color_mask 对齐后的 de / 帧末
+    wire [10:0] S_det_px;                   // 对齐后的像素坐标
+    wire [9:0]  S_det_py;
+    wire [1:0]  S_det_color;                // 单像素颜色类别（红>蓝>绿）
+
+    wire [5:0]  S_lbl;                      // conn_label 每像素 label 流
+    wire        S_lbl_v, S_lbl_de;
+    wire [10:0] S_lbl_x;
+    wire [9:0]  S_lbl_y;
+
+    wire        S_cmp_valid;                // conn_label 帧末汇总流
+    wire [5:0]  S_cmp_label;
+    wire [1:0]  S_cmp_cls;
+    wire [19:0] S_cmp_area;
+    wire [10:0] S_cmp_xmin, S_cmp_xmax, S_cmp_cx;
+    wire [9:0]  S_cmp_ymin, S_cmp_ymax, S_cmp_cy;
+    wire [5:0]  S_cmp_cnt;
+
+    wire [`TGT_BUS_W-1:0] S_target_bus;     // conn_features 输出的 4×96 目标总线
+    wire [2:0]            S_target_cnt;
+    wire                  S_target_update;
+
+    wire [3:0]  S_box_valid;                // 目标总线展开 → box_draw
+    wire [43:0] S_box_xmin, S_box_xmax;
+    wire [39:0] S_box_ymin, S_box_ymax;
 
     //===== 自动曝光 AE 测光信号 =====
     wire [7:0]  S_ae_y_avg;        // 帧平均亮度（74.25MHz 域，更新后保持整帧）
@@ -970,8 +999,9 @@ isp_top u_isp_top (
     //   目的：上板验证「坐标系统 + 画框对齐」是否正确。
     //   SELF_TEST=1 ⇒ 画 4 个写死坐标的框 + 白色十字准星（准星在屏心 640,360），
     //   与左下角 OSD 读数 X:0640 / Y:0360 互相印证。
-    //   D4 起接入张金艺的目标列表：SELF_TEST 改 0，总线接真实检测结果即可。
-    //   注：本段仅在 workbuddy 分支集成，未改动任何原有逻辑。
+    //   ★D4（张金艺）：SELF_TEST 已改 0，I_box_* 接真实检测目标（由下方
+    //     conn_features 的 384bit 目标总线展开）；十字准星保留作对位基准。
+    //   注：本段仅在 Rrrrrr_ 分支集成，未改动任何原有逻辑。
     //==================================================================
     pix_coord_gen #(
         .H_ACTIVE ( 1280 ),
@@ -992,19 +1022,19 @@ isp_top u_isp_top (
     );
 
     box_draw #(
-        .SELF_TEST ( 1 )
+        .SELF_TEST ( 0 )        // ★D4：1→0，改画真实检测目标（原 1 = 固定标定框）
     )u_box_draw(
         .I_clk       ( S_hdmi_pixel_clk ),
         .I_rst_n     ( S_hdmi_rst_n     ),
         .I_de        ( S_hdmi_de        ),
         .I_pix_x     ( S_pix_x          ),
         .I_pix_y     ( S_pix_y          ),
-        .I_box_valid ( 4'b0000          ),   // SELF_TEST=1 时被常量折叠
-        .I_box_xmin  ( 44'd0            ),
-        .I_box_xmax  ( 44'd0            ),
-        .I_box_ymin  ( 40'd0            ),
-        .I_box_ymax  ( 40'd0            ),
-        .I_cross_en  ( 1'b1             ),
+        .I_box_valid ( S_box_valid      ),   // ← conn_features 目标总线（4 槽展开）
+        .I_box_xmin  ( S_box_xmin       ),
+        .I_box_xmax  ( S_box_xmax       ),
+        .I_box_ymin  ( S_box_ymin       ),
+        .I_box_ymax  ( S_box_ymax       ),
+        .I_cross_en  ( 1'b1             ),   // 十字准星保留（屏心 640,360，便于对位）
         .I_cross_x   ( 11'd640          ),
         .I_cross_y   ( 10'd360          ),
         .O_hit       ( S_box_hit        ),
@@ -1033,8 +1063,9 @@ isp_top u_isp_top (
     // ★张金艺 detect_zjy —— D1 交付：YCbCr 双阈值颜色掩膜
     //   取数点：S_video_sat（与 S_hdmi_de 同源，PIPE_DELAY=0）
     //   坐标  ：接 S_pix_x_2d / S_pix_y_2d（由 u_pix_coord_gen 生成）→ PIX_DLY=2
-    //   输出  ：O_mask → S_mask_hit；颜色固定绿（可改 S_mask_color）
-    //   注：`I_color_sel` 暂用常量（2'd0 = 红）。后续可由拨码 SW 驱动。
+    //   输出  ：O_mask → S_mask_hit（选色伪彩）
+    //   ★D4：I_color_sel 改 2'd3（三色取或），配合 conn_label 做「多色同帧」分类；
+    //         同时把对齐后的 O_de / O_pix_x / O_pix_y / O_frame_done 引出给 conn_label。
     //==================================================================
     wire        S_det_mask_r, S_det_mask_g, S_det_mask_b;
 
@@ -1054,7 +1085,7 @@ isp_top u_isp_top (
         .I_rgb      ( S_video_sat      ),
         .I_pix_x    ( S_pix_x_2d       ),
         .I_pix_y    ( S_pix_y_2d       ),
-        .I_color_sel( 2'd0             ),   // 0=红 1=蓝 2=绿 3=全部
+        .I_color_sel( `COLOR_SEL_OR    ),   // ★D4：2'd3 = 三色取或（多色同帧）
         .O_mask     ( S_mask_hit       ),
         .O_mask_r   ( S_det_mask_r     ),
         .O_mask_g   ( S_det_mask_g     ),
@@ -1062,15 +1093,97 @@ isp_top u_isp_top (
         .O_y        (                  ),
         .O_cb       (                  ),
         .O_cr       (                  ),
-        .O_de       (                  ),
+        .O_de       ( S_det_de         ),   // ★D4：对齐后的 de / 坐标 / 帧末引出给 conn_label
         .O_vsync    (                  ),
         .O_hsync    (                  ),
         .O_user     (                  ),
         .O_last     (                  ),
-        .O_pix_x    (                  ),
-        .O_pix_y    (                  ),
-        .O_frame_done(                 )
+        .O_pix_x    ( S_det_px         ),
+        .O_pix_y    ( S_det_py         ),
+        .O_frame_done( S_det_fdone     )
     );
+
+    //==================================================================
+    // ★张金艺 D2/D4：连通域标注 + 特征汇总 → 目标总线（艺 → 晨 → 郭）
+    //   链路：detect_color_mask → 单像素颜色编码 → conn_label(4 连通 RLE-CCL)
+    //         → conn_features(面积降序前 4 擂台) → target_bus(4×96=384bit) → box_draw
+    //   颜色优先级（高→低）：红 > 蓝 > 绿；三色均不命中 ⇒ 未分类。
+    //   ⚠ I_frame_done 用 detect_color_mask 的对齐帧末脉冲：conn_label 仅借它做
+    //     帧首复位游程/label 计数，帧末汇总由模块内部按「最后一行结束」自行触发。
+    //==================================================================
+    assign S_det_color = S_det_mask_r ? `CLS_RED   :
+                         S_det_mask_b ? `CLS_BLUE  :
+                         S_det_mask_g ? `CLS_GREEN : `CLS_UNKNOWN;
+
+    conn_label #(
+        .IMG_WIDTH  ( `IMG_WIDTH  ),
+        .IMG_HEIGHT ( `IMG_HEIGHT ),
+        .MIN_AREA   ( 16          )     // 小面积噪声门限
+    )u_conn_label(
+        .clk            ( S_hdmi_pixel_clk ),
+        .rst_n          ( S_hdmi_rst_n     ),
+        .I_de           ( S_det_de         ),
+        .I_mask         ( S_mask_hit       ),
+        .I_color        ( S_det_color      ),
+        .I_pix_x        ( S_det_px         ),
+        .I_pix_y        ( S_det_py         ),
+        .I_frame_done   ( S_det_fdone      ),
+        .O_label        ( S_lbl            ),
+        .O_label_valid  ( S_lbl_v          ),
+        .O_label_de     ( S_lbl_de         ),
+        .O_label_pix_x  ( S_lbl_x          ),
+        .O_label_pix_y  ( S_lbl_y          ),
+        .O_cmp_valid    ( S_cmp_valid      ),
+        .O_cmp_label    ( S_cmp_label      ),
+        .O_cmp_cls      ( S_cmp_cls        ),
+        .O_cmp_area     ( S_cmp_area       ),
+        .O_cmp_xmin     ( S_cmp_xmin       ),
+        .O_cmp_xmax     ( S_cmp_xmax       ),
+        .O_cmp_cx       ( S_cmp_cx         ),
+        .O_cmp_ymin     ( S_cmp_ymin       ),
+        .O_cmp_ymax     ( S_cmp_ymax       ),
+        .O_cmp_cy       ( S_cmp_cy         ),
+        .O_cmp_cnt      ( S_cmp_cnt        )
+    );
+
+    conn_features #(
+        .SLOT_N ( `TARGET_MAX )         // 4
+    )u_conn_features(
+        .clk               ( S_hdmi_pixel_clk ),
+        .rst_n             ( S_hdmi_rst_n     ),
+        .I_frame_done      ( S_det_fdone      ),
+        .I_cmp_valid       ( S_cmp_valid      ),
+        .I_cmp_label       ( S_cmp_label      ),
+        .I_cmp_cls         ( S_cmp_cls        ),
+        .I_cmp_area        ( S_cmp_area       ),
+        .I_cmp_xmin        ( S_cmp_xmin       ),
+        .I_cmp_xmax        ( S_cmp_xmax       ),
+        .I_cmp_ymin        ( S_cmp_ymin       ),
+        .I_cmp_ymax        ( S_cmp_ymax       ),
+        .I_cmp_cx          ( S_cmp_cx         ),
+        .I_cmp_cy          ( S_cmp_cy         ),
+        .O_target_bus      ( S_target_bus     ),
+        .O_target_valid_cnt( S_target_cnt     ),
+        .O_update          ( S_target_update  )
+    );
+
+    //---- target_bus(4×96) 逐槽展开 → box_draw 的 4 框输入 ----
+    //   单槽位域（common_defs.vh §3）：valid[0] cls[2:1] cx[13:3] cy[23:14]
+    //   xmin[34:24] xmax[45:35] ymin[55:46] ymax[65:56] area[85:66]
+    //   ① 用 generate 展开，避免手写 4×5 条赋值出错；
+    //   ② 空槽 valid=0（conn_features 已清零字段），box_draw 自然不画。
+    genvar gbox;
+    generate
+        for (gbox = 0; gbox < 4; gbox = gbox + 1) begin : g_box_slot
+            wire [`TGT_SLOT_W-1:0] sl;
+            assign sl = S_target_bus[gbox*`TGT_SLOT_W +: `TGT_SLOT_W];
+            assign S_box_valid[gbox]         = sl[`TGT_O_VALID];
+            assign S_box_xmin[11*gbox +: 11] = sl[`TGT_O_XMIN +: 11];
+            assign S_box_xmax[11*gbox +: 11] = sl[`TGT_O_XMAX +: 11];
+            assign S_box_ymin[10*gbox +: 10] = sl[`TGT_O_YMIN +: 10];
+            assign S_box_ymax[10*gbox +: 10] = sl[`TGT_O_YMAX +: 10];
+        end
+    endgenerate
 
     assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
     assign S_ovl_hit    = S_mask_hit | S_box_hit | S_coord_hit;

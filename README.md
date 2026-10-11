@@ -3,6 +3,8 @@
 基于安路 PH1P35 FPGA 的实时视频图像处理系统：MIPI 摄像头采集 → ISP 图像处理 → DDR3 帧缓存 → 图像处理 → HDMI 显示。
 支持 4 种图像处理模式通过拨码开关实时切换，并具备较完整的 ISP 链路（黑电平校正、去马赛克、自动白平衡、Gamma 校正、色度降噪、饱和度增强）与可现场调节的增益控制。
 
+在画质链路之外，**方案B 提供实时目标检测与跟踪**：YCbCr 双阈值颜色掩膜 → 游程法 4 连通域标注 → 帧末特征汇总（面积 / 包围盒 / 质心 / 颜色）→ 前 4 目标列表总线 → 画框 OSD 叠加。
+
 ## 硬件平台
 
 | 项目 | 型号 |
@@ -56,6 +58,19 @@
 - 增益阶梯覆盖 **1x ~ 126x**（模拟 32x × 数字粗 2x × 数字细 1.969x），上电默认 63x（`I_AG=207`）
 - **按键功能已改为调「靶亮度」**（范围 60 ~ 200，默认 120，单次按下 ±8），而不是直接调增益
 
+### 4. 目标检测与跟踪（方案B）
+
+在画质链路之外并行的一条**检测链**，输出目标列表供画框显示（详见 `doc/开发方案B-目标检测跟踪与运动检测.md`）：
+
+- **颜色检测（`detect_zjy/detect_color_mask.v`）**：RGB → YCbCr 后对 Cb/Cr 双阈值判决，输出二值掩膜；
+  `I_color_sel` = `0/1/2` 取单色、`3` 取三色相或（多色同帧）。
+- **连通域标注（`common_base/conn_label.v`）**：行内游程（RLE）+ 行间 **4 连通**重叠判定 + 深度 32 等价表并查集（纯寄存器）。
+  输出**每像素 label 流**（6 bit，0 = 无归属）与**帧末汇总**（紧凑编号 / 面积 / 包围盒 / 质心；
+  质心在消隐期用 31 步移位-减法除法器算），并给出每个连通域的颜色分类 `cls`（优先级 红 > 蓝 > 绿）。
+- **特征汇总（`common_base/conn_features.v`）**：汇总流按**面积降序取前 4**（插入排序擂台），
+  经 `common_base/target_bus.v` 打成 **384 bit 目标列表总线**（4 槽 × 96 bit）。
+- **画框 OSD（`track_box/rtl/box_draw.v`）**：按目标列表在屏上画框，并叠加屏心十字准星。
+
 ## 系统架构
 
 ```
@@ -105,6 +120,24 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 > **排查提示**：`Gamma` 之后数据流分叉——灰度/二值/Sobel 三路直接从 `S_video_bright` 取数，
 > 只有彩色原图通路才经过色度降噪与饱和度增强。因此**若灰度正常而彩色异常，问题必在这两个模块**。
 
+**方案B 目标检测链**（与上面的四模式处理链**并行**，挂在显示域数据上）：
+
+```
+显示域 RGB ──► YCbCr（Cb/Cr 双阈值）──► 颜色掩膜
+                                            │
+                                            ▼
+                          conn_label（4 连通 RLE-CCL 连通域标注）
+                                            │ 每像素 label 流 + 帧末汇总
+                                            ▼
+                          conn_features（面积降序取前 4 → 384bit 目标总线）
+                                            │
+                                            ▼
+                          box_draw（按目标列表画框 + 屏心十字）──► HDMI 叠加
+```
+
+> ⚠ 检测链里 `conn_label` 的 `I_de / I_mask / I_pix_x / I_pix_y` **必须全部取自 `detect_color_mask` 的 `O_*`**，
+> 四者严格同拍；**不可**改接 `hdmi_mixer` 侧的延时信号（延时对不上会导致整帧错位）。
+
 ## 工程结构
 
 ```
@@ -149,6 +182,16 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 │   │       ├── chroma_denoise.v               # 色度降噪主体（5 级流水）
 │   │       ├── line_delay_ram.v               # 行延时 RAM（需一并加入工程）
 │   │       └── 说明.md                        # 算法、BUG 修复记录与调试步骤
+│   │   ├── common_base/                   # 【方案B】两人共用的公共基础模块（与张铭晨）
+│   │   │   ├── common_defs.vh                 # 全局常量 / 位宽 / 接口位域（★ 接口宪法）
+│   │   │   ├── ycbcr_convert.v                # RGB888 → YCbCr（位级复用 chroma_denoise）
+│   │   │   ├── target_bus.v                   # 目标列表 384bit 打包 / 解包
+│   │   │   ├── conn_label.v                   # 4 连通 RLE-CCL 连通域标注
+│   │   │   └── conn_features.v                # 帧末汇总 → 面积降序前 4 → target_bus
+│   │   ├── detect_zjy/                    # 【方案B】张金艺私有：目标检测
+│   │   │   └── detect_color_mask.v            # YCbCr 双阈值颜色掩膜
+│   │   └── track_box/                     # 【方案B】张铭晨：坐标 / 画框 / OSD
+│   │       └── rtl/                           # pix_coord_gen / box_draw / osd_coord / track_glyph_rom
 │   ├── ip_source/                         # IP 核（PLL / FIFO / ERAM / divider / DDR）
 │   └── doc/                               # 设计文档与参考资料
 └── doc/                                   # 项目文档
@@ -247,6 +290,12 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
    - `user_source/hdl_source/denoise_fix/chroma_denoise.v`
    - `user_source/hdl_source/denoise_fix/line_delay_ram.v`（**必须与上者同时加入**）
    - `user_source/hdl_source/uiisp_beta/ae_meter.v`（AE 测光，**仅此一份，不要同时加 `ae_fix/` 下的**）
+   - **【方案B】** `user_source/hdl_source/common_base/` 下的 `ycbcr_convert.v` / `target_bus.v` / `conn_label.v` / `conn_features.v`
+   - **【方案B】** `user_source/hdl_source/detect_zjy/detect_color_mask.v`
+   - **【方案B】** `user_source/hdl_source/track_box/rtl/` 下的 `pix_coord_gen.v` / `box_draw.v` / `osd_coord.v` / `track_glyph_rom.v`
+   >
+   > ⚠ **include 搜索路径**：方案B 的 `.v` 里用了 `` `include "common_defs.vh" ``，需把
+   > `user_source/hdl_source/common_base` 加入 TD 的 **include 搜索路径**；`.vh` 本身**不要**加入综合清单（它只被 include）。
 3. **同名多副本的处理**（本工程的重灾区）：加入新 `xxx.v` 前若工程里已有同名模块，
    必须先 Remove 旧文件再 Add，否则报"模块重复定义"。典型例：`uiisp_beta/raw10_unpacket_2lane.v`
    与 `isp/raw10_unpacket_2lane.v` 同名，但**只有后者在 `.al` 清单里**，前者从未参与编译，别改它。
@@ -264,6 +313,7 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 | v4 | 饱和度增强：新增 `sat_enhance.v`（保持亮度 Y 不变、只放大色度），接在 Gamma 之后、MUX 之前，仅作用于彩色原图通路 |
 | v5 | ① 黑电平前移到 RAW 域（AWB 之前）；② 新增 `chroma_denoise.v` 色度降噪 + `line_delay_ram.v` |
 | v6 | ① 修复黑电平**完全没扣**的 BUG（雾感真根因）；② 新增 AE 自动曝光闭环（`ae_meter` + `ae_set`）；③ 按键由扩展口改绑板载 KEY1/KEY2；④ 修复 AE 引入的两处时序违例（SDC false path + `ae_meter` 乘法打拍）；⑤ `ae_meter` v3 中央重点加权测光 |
+| v7 | **方案B：实时目标检测与跟踪**（张金艺 / 张铭晨）。新增 `common_base/`（`common_defs.vh` / `ycbcr_convert.v` / `target_bus.v` / `conn_label.v` / `conn_features.v`）+ `detect_zjy/detect_color_mask.v` + `track_box/`（`pix_coord_gen` / `box_draw` / `osd_coord` / `track_glyph_rom`）。链路：YCbCr 双阈值颜色掩膜 → 4 连通 RLE-CCL 连通域 → 帧末特征（面积 / bbox / 质心 / 颜色 cls）→ 前 4 目标 → 384bit 目标列表总线 → 画框 OSD。位级对拍全通过 |
 
 ### v6 修复说明（黑电平一次都没扣）
 
@@ -339,6 +389,8 @@ v5.2 通过比特级 Python 模型验证：往返平均误差 0.78、256 级灰�
 
 - **AE 自动曝光**：v6 已实现闭环（见上文 §3）。场景切换 0.3~1 s 收敛。
 - **雾感 / 发灰**：v6 修复了黑电平完全没扣的 BUG，暗部不再被 Gamma 抬到 ~72 灰（详见 v6 修复说明）。
+- **【方案B】目标检测链**：v7 完成 D1~D4（颜色掩膜 → 连通域 → 特征汇总 → 目标总线 → 画框 OSD），位级对拍全通过。
+  后续 D5+：伪彩叠加（用 `O_label` 流，需同步延一行）、`osd_coord` 接真实主目标质心、框色随 `cls` 联动。
 
 ### 待办（见 `doc/开发方案A-图像质量与风格化.md`）
 
