@@ -42,7 +42,7 @@ module conn_label #(
     parameter integer IMG_HEIGHT = `IMG_HEIGHT,   // 720
     parameter integer RUN_MAX    = `LABEL_MAX,    // 32（每行最多游程数）
     parameter integer LABEL_MAX  = `LABEL_MAX,    // 32（等价表深度）
-    parameter integer MIN_AREA   = 16             // 最小面积门限（低于视为噪声）
+    parameter integer MIN_AREA   = `MIN_AREA       // 最小面积门限（低于视为噪声；值同源于 common_defs.vh）
 )(
     input  wire        clk,
     input  wire        rst_n,

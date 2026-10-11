@@ -1118,7 +1118,7 @@ isp_top u_isp_top (
     conn_label #(
         .IMG_WIDTH  ( `IMG_WIDTH  ),
         .IMG_HEIGHT ( `IMG_HEIGHT ),
-        .MIN_AREA   ( 16          )     // 小面积噪声门限
+        .MIN_AREA   ( `MIN_AREA    )     // 小面积噪声门限（冻结 v1.5 = 16，源自 common_defs.vh）
     )u_conn_label(
         .clk            ( S_hdmi_pixel_clk ),
         .rst_n          ( S_hdmi_rst_n     ),

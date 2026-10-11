@@ -72,7 +72,7 @@
 | `IMG_WIDTH` / `IMG_HEIGHT` | 1280 / 720 | 必须与视频时序一致（用于识别最后一行） |
 | `RUN_MAX` | 32 | 每行最多游程数 |
 | `LABEL_MAX` | 32 | 最大连通域数 / 等价表深度 |
-| `MIN_AREA` | 16 | 最小面积门限；低于此值的连通域不进 `O_cmp_*`（滤噪点） |
+| `MIN_AREA` | `` `MIN_AREA `` | 最小面积门限；低于此值的连通域不进 `O_cmp_*`（滤噪点）。默认值引用 `common_defs.vh` 的 `` `define MIN_AREA ``（★ 冻结 v1.5 = 16），与 `target_pack.AREA_MIN` **同源** |
 
 > ⚠ 本模块内部按 **32** 展开并行比较器（最小 label 归约用的是 32→1 的 5 级平衡树）。
 > 改 `LABEL_MAX` 需同步调整 §`generate` 段中的树形归约。
@@ -249,7 +249,7 @@ wire [5:0]  S_lbl;   wire S_lbl_v, S_lbl_de;
 wire [10:0] S_lbl_x; wire [9:0] S_lbl_y;
 
 conn_label #(
-    .IMG_WIDTH(1280), .IMG_HEIGHT(720), .MIN_AREA(16)
+    .IMG_WIDTH(1280), .IMG_HEIGHT(720), .MIN_AREA(`MIN_AREA)
 ) u_conn_label (
     .clk(S_hdmi_pixel_clk), .rst_n(S_hdmi_rst_n),
     .I_de(S_det_de), .I_mask(S_det_mask), .I_color(S_det_cls),
