@@ -2,7 +2,7 @@
 
 > 项目：MIPI-HDMI 实时视频图像处理系统 · 方案B §2.3 / §3.1 / §4
 > 负责人：**张金艺** ｜ 归属：`user_source/hdl_source/common_base/`（艺 → 晨）
-> 依据：`doc/接口冻结表.md v1.1 §2`
+> 依据：`doc/接口冻结表.md v1.4 §2`
 
 ---
 

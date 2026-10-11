@@ -184,7 +184,7 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 │   │       └── 说明.md                        # 算法、BUG 修复记录与调试步骤
 │   │   ├── common_base/                   # 【方案B】两人共用的公共基础模块（与张铭晨）
 │   │   │   ├── common_defs.vh                 # 全局常量 / 位宽 / 接口位域（★ 接口宪法）
-│   │   │   ├── ycbcr_convert.v                # RGB888 → YCbCr（位级复用 chroma_denoise）
+│   │   │   ├── ycbcr_convert.v                # RGB888 → YCbCr（公共等价版；当前未被例化）
 │   │   │   ├── target_bus.v                   # 目标列表 384bit 打包 / 解包
 │   │   │   ├── conn_label.v                   # 4 连通 RLE-CCL 连通域标注
 │   │   │   └── conn_features.v                # 帧末汇总 → 面积降序前 4 → target_bus
@@ -290,7 +290,9 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
    - `user_source/hdl_source/denoise_fix/chroma_denoise.v`
    - `user_source/hdl_source/denoise_fix/line_delay_ram.v`（**必须与上者同时加入**）
    - `user_source/hdl_source/uiisp_beta/ae_meter.v`（AE 测光，**仅此一份，不要同时加 `ae_fix/` 下的**）
-   - **【方案B】** `user_source/hdl_source/common_base/` 下的 `ycbcr_convert.v` / `target_bus.v` / `conn_label.v` / `conn_features.v`
+   - **【方案B】** `user_source/hdl_source/common_base/` 下的 `conn_label.v` / `conn_features.v` / `target_bus.v`
+     > `common_base/ycbcr_convert.v` 是抽出的**公共等价版本**（与 `detect_color_mask` 内部 YCbCr 已做位级等价对拍），
+     > 当前**未被任何模块例化**，暂不必加入综合清单。
    - **【方案B】** `user_source/hdl_source/detect_zjy/detect_color_mask.v`
    - **【方案B】** `user_source/hdl_source/track_box/rtl/` 下的 `pix_coord_gen.v` / `box_draw.v` / `osd_coord.v` / `track_glyph_rom.v`
    >
