@@ -63,6 +63,7 @@ def build_vectors():
 # ---------------------------------------------------------------------------
 class RtlParams(object):
     def __init__(self, path):
+        self.path = path
         with open(path, "r", encoding="utf-8", errors="replace") as fp:
             self.src = fp.read()
 
@@ -133,6 +134,30 @@ class RtlParams(object):
                      "GREEN_CB_LO", "GREEN_CB_HI", "GREEN_CR_LO", "GREEN_CR_HI"):
             if name not in self.param:
                 raise RuntimeError("未能解析参数 %s" % name)
+
+        # ---- 5b. ★ 2026-10-12 新增：与 common_defs.vh 的宏做一致性交叉校验 ----
+        #   背景：顶层 design_top_wrapper.v 现在用 `MAG_TH 等宏例化，模块 parameter
+        #         默认值是字面量。两者不一致就会「改了门限却没生效」——
+        #         2026-10-12 现场就是这么翻车的（顶层写成 8'd16 覆盖了默认 48）。
+        #   做法：找同目录的 ../common_base/common_defs.vh，逐宏比对；不一致直接报错。
+        cdefs = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(self.path)), "..", "common_base", "common_defs.vh"))
+        self.macro = {}
+        if os.path.exists(cdefs):
+            with open(cdefs, "r", encoding="utf-8", errors="replace") as fp:
+                for m in re.finditer(r"`define\s+([A-Z][A-Z0-9_]*)\s+(\d+)", fp.read()):
+                    self.macro[m.group(1)] = int(m.group(2))
+            mism = []
+            for nm in ("MAG_TH", "RATIO10", "G_AXIS_TH"):
+                if nm in self.macro and self.param[nm] != self.macro[nm]:
+                    mism.append("%s: 模块默认=%d  vs  common_defs.vh=%d"
+                                % (nm, self.param[nm], self.macro[nm]))
+            if mism:
+                raise RuntimeError(
+                    "★ 门限参数分叉！模块 parameter 默认值与 common_defs.vh 的宏不一致：\n    "
+                    + "\n    ".join(mism)
+                    + "\n  顶层 design_top_wrapper.v 例化时引的是宏 —— 模块默认值被覆盖，"
+                      "实际生效的是 common_defs.vh 那份。请把两边改成同一个值。")
 
         # ---- 6. 从 RTL 源码校验判据结构是否与模型一致（防止 RTL 被改而模型没跟）----
         #     自适应判据的四条方向/比值表达式必须在 RTL 里原样出现

@@ -1089,10 +1089,15 @@ isp_top u_isp_top (
         //   处置：改为以 (128,128) 为原点的「方向 + 幅度」判据，对整体亮度缩放免疫。
         //   实测：35% 亮度下红/蓝/绿全部 1.00 检出（原来 0.14/0.11/0.00），
         //         干扰色误判率 5.7% → 1.1%。详见 detect_color_mask.v 参数区注释。
-        .MAG_TH     ( 8'd16   ),
-        .RATIO10    ( 5'd13   ),
-        // 若现场光仍然不足，把 MAG_TH 往下调（14 → 12 → 10），逐级试；
-        // 若误检（把橙色/肤色当红）太多，把 MAG_TH 往上调（18 → 20）。
+        .MAG_TH     ( `MAG_TH  ),
+        .RATIO10    ( `RATIO10 ),
+        .G_AXIS_TH  ( `G_AXIS_TH ),
+        // ★ 2026-10-12 血泪教训：这三行原来写的是字面量 `.MAG_TH(8'd16)`
+        //   —— 只改了 detect_color_mask.v 的 parameter 默认值，被这里
+        //      显式覆盖回 16，**新门限根本没生效**（掩膜仍满屏噪声 →
+        //      conn_label 每行游程爆表 → 超出 NEG=8 → 真目标被挤掉 → 无框）。
+        //   现改为引 common_defs.vh 的宏，与模块默认值**同源**，不会再分叉。
+        //   改门限只需改 common_defs.vh 一处（§5b）。
         .USE_ABS_WINDOW ( 0   )
     )u_detect_color_mask(
         .clk        ( S_hdmi_pixel_clk ),
