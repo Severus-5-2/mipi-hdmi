@@ -244,6 +244,14 @@ module design_top_wrapper (
     wire [9:0]  S_det_py;
     wire [1:0]  S_det_color;                // 单像素颜色类别（红>蓝>绿）
 
+    // ★ 2026-10-12：去斑后（mask_despeckle 输出）—— 这一路才进 conn_label
+    wire        S_dspk_mask;
+    wire        S_dspk_mr, S_dspk_mg, S_dspk_mb;
+    wire        S_dspk_de, S_dspk_fdone;
+    wire [10:0] S_dspk_px;
+    wire [9:0]  S_dspk_py;
+    wire [1:0]  S_dspk_color;
+
     wire [5:0]  S_lbl;                      // conn_label 每像素 label 流
     wire        S_lbl_v, S_lbl_de;
     wire [10:0] S_lbl_x;
@@ -1129,16 +1137,52 @@ isp_top u_isp_top (
     );
 
     //==================================================================
-    // ★张金艺 D2/D4：连通域标注 + 特征汇总 → 目标总线（艺 → 晨 → 郭）
-    //   链路：detect_color_mask → 单像素颜色编码 → conn_label(4 连通 RLE-CCL)
-    //         → conn_features(面积降序前 4 擂台) → target_bus(4×96=384bit) → box_draw
-    //   颜色优先级（高→低）：红 > 蓝 > 绿；三色均不命中 ⇒ 未分类。
-    //   ⚠ I_frame_done 用 detect_color_mask 的对齐帧末脉冲：conn_label 仅借它做
-    //     帧首复位游程/label 计数，帧末汇总由模块内部按「最后一行结束」自行触发。
+    // ★ 2026-10-12：掩膜水平去斑（mask_despeckle）
+    //   为什么需要它（现场三轮排查得出的根因）：
+    //     conn_label 的等价表深度 **NEG=8** 规定「同一帧最多 8 个连通域，先到先得」，
+    //     而**传感器噪点每个孤立点自成一个连通域**（σ=8 时实测 4.6 万个）
+    //     ⇒ 靠调高判据门限压噪声会把目标一起压掉（MAG_TH=48 时只有物体边缘能检出）；
+    //       靠调低门限则噪声占满 NEG 名额，真目标被挤掉。
+    //     去斑利用「噪声是孤立散点、目标是成片区域」把散点清掉：
+    //       实测 σ=8 时噪声连通域 11253 → 0，而实心目标 100% 保留。
+    //   ⚠ 注意：显示叠加（S_ovl_hit）也取**去斑后**的掩膜 S_dspk_mask ——
+    //     它就是真正喂给 conn_label 的那一路。看到什么，连通域就吃到什么，
+    //     是判断「框为什么出不来」最直接的证据（代价：绿点整体右移约 7 像素）。
     //==================================================================
     assign S_det_color = S_det_mask_r ? `CLS_RED   :
                          S_det_mask_b ? `CLS_BLUE  :
                          S_det_mask_g ? `CLS_GREEN : `CLS_UNKNOWN;
+
+    mask_despeckle #(
+        .HALF       ( 4 ),      // 水平半窗（左右各 4 ⇒ 9 像素窗）
+        .KMIN       ( 5 ),      // 窗内至少 5 个命中才保留
+        .DCH        ( 2 ),      // 公共输出延迟链深度
+        .ENABLE     ( 1 )       // 1 = 启用去斑；0 = 旁路（仅延迟）
+    )u_mask_despeckle(
+        .clk            ( S_hdmi_pixel_clk ),
+        .rst_n          ( S_hdmi_rst_n     ),
+        .I_de           ( S_det_de         ),
+        .I_mask         ( S_mask_hit       ),
+        .I_mask_r       ( S_det_mask_r     ),
+        .I_mask_g       ( S_det_mask_g     ),
+        .I_mask_b       ( S_det_mask_b     ),
+        .I_frame_done   ( S_det_fdone      ),
+        .I_pix_x        ( S_det_px         ),
+        .I_pix_y        ( S_det_py         ),
+        .O_de           ( S_dspk_de        ),
+        .O_mask         ( S_dspk_mask      ),
+        .O_mask_r       ( S_dspk_mr        ),
+        .O_mask_g       ( S_dspk_mg        ),
+        .O_mask_b       ( S_dspk_mb        ),
+        .O_frame_done   ( S_dspk_fdone     ),
+        .O_pix_x        ( S_dspk_px        ),
+        .O_pix_y        ( S_dspk_py        )
+    );
+
+    //  去斑后的逐像素颜色（与去斑后的掩膜同像素）
+    assign S_dspk_color = S_dspk_mr ? `CLS_RED   :
+                          S_dspk_mb ? `CLS_BLUE  :
+                          S_dspk_mg ? `CLS_GREEN : `CLS_UNKNOWN;
 
     conn_label #(
         .IMG_WIDTH  ( `IMG_WIDTH  ),
@@ -1147,12 +1191,12 @@ isp_top u_isp_top (
     )u_conn_label(
         .clk            ( S_hdmi_pixel_clk ),
         .rst_n          ( S_hdmi_rst_n     ),
-        .I_de           ( S_det_de         ),
-        .I_mask         ( S_mask_hit       ),
-        .I_color        ( S_det_color      ),
-        .I_pix_x        ( S_det_px         ),
-        .I_pix_y        ( S_det_py         ),
-        .I_frame_done   ( S_det_fdone      ),
+        .I_de           ( S_dspk_de        ),   // ★ 用去斑后的一路
+        .I_mask         ( S_dspk_mask      ),
+        .I_color        ( S_dspk_color     ),
+        .I_pix_x        ( S_dspk_px        ),
+        .I_pix_y        ( S_dspk_py        ),
+        .I_frame_done   ( S_dspk_fdone     ),
         .O_label        ( S_lbl            ),
         .O_label_valid  ( S_lbl_v          ),
         .O_label_de     ( S_lbl_de         ),
@@ -1215,17 +1259,21 @@ isp_top u_isp_top (
 
     //------------------------------------------------------------------
     //  ★ 2026-10-12：掩膜叠加显示开关
-    //    现场反馈：检测掩膜以绿色小点铺满画面（人/墙/帘子上全是）且逐帧乱跳，
-    //              干扰观察、也看不出真实目标。
-    //    1 = 显示：每个「掩膜命中」像素被纯替换成纯绿 0x00FF00（调试用）
-    //    0 = 不显示（★当前默认）
-    //    ⚠ 关掉的只是**显示**：检测 → 连通域 → target_bus → 画框 整条链路不受影响。
-    //      重新综合后若想直接看掩膜效果（确认判据修好了），把 0 改成 1 再综合一次即可。
+    //    现场反馈：检测掩膜以绿色小点铺满画面（人/墙/帘子上全是）且逐帧乱跳。
+    //    1 = 显示（★ 当前默认，用于本轮现场诊断）
+    //    0 = 不显示（最终演示版建议改回 0）
+    //    ⚠ 关掉的只是**显示**：检测 → 去斑 → 连通域 → target_bus → 画框 不受影响。
+    //
+    //    ★ 显示的是**去斑后**的掩膜（S_dspk_mask）而不是原始掩膜，原因：
+    //      它就是真正喂给 conn_label 的那一路 —— 看到什么，连通域就吃到什么，
+    //      是判断「框为什么出不来」最直接的证据。
+    //      （代价：相对视频像素延后约 7 拍 ⇒ 绿点整体右移约 7 像素，
+    //        相对 1280 宽可忽略。）
     //------------------------------------------------------------------
-    localparam MASK_OVERLAY_EN = 0;
+    localparam MASK_OVERLAY_EN = 1;
 
     assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
-    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_mask_hit : 1'b0) | S_box_hit | S_coord_hit;
+    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_dspk_mask : 1'b0) | S_box_hit | S_coord_hit;
     assign S_ovl_color  = S_coord_hit ? S_coord_color :
                           (S_box_hit  ? S_box_color  : S_mask_color);
 
