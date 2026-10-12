@@ -82,10 +82,12 @@
 `timescale 1ns / 1ps
 
 module mask_despeckle #(
-    parameter integer HALF   = 5,   // 半窗（左右各 HALF 像素）
-    parameter integer KMIN   = 10,  // 窗内至少 KMIN 个命中才保留
-    parameter integer DCH    = 2,   // 公共输出延迟链深度
-    parameter integer ENABLE = 1    // 0 = 旁路（仅整体延迟，不做去斑）
+    parameter integer HALF     = 4,   // 水平半窗（左右各 HALF 像素）
+    parameter integer KMIN     = 5,   // 水平窗内至少 KMIN 个命中
+    parameter integer VER_ROWS = 3,   // 垂直投票看的行数
+    parameter integer VER_NEED = 2,   // 至少几行通过才保留
+    parameter integer DCH      = 2,   // 公共输出延迟链深度
+    parameter integer ENABLE   = 1    // 0 = 旁路（仅整体延迟，不做去斑）
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -139,8 +141,98 @@ module mask_despeckle #(
     end
 
     wire W_keep = (S_cnt >= KMIN[3:0]);
-    //  S_sr[HALF] 是中心像素的原始掩膜值（用于与 W_keep 对齐的直通路径）
-    wire W_mask_dspk = ENABLE ? W_keep : S_sr[HALF];
+
+    //=========================================================================
+    //  2b. ★ 垂直「多数投票」（2026-10-12 最终方案）
+    //---------------------------------------------------------------------
+    //   为什么需要它：光靠水平窗（HALF=4,KMIN=5）对**水平相关的噪声**无效
+    //   （本工程 chroma_denoise 会水平平滑色度，噪声变成短条），
+    //   而把水平窗调严（如 KMIN=10）又会把**斑点状物体**打碎 ——
+    //   仿真：物体命中密度 0.7 时，KMIN=10 把 400x250 的物体打成只剩 67 px 的碎片。
+    //
+    //   加上垂直投票后两者兼顾（仿真，整帧 1280x720）：
+    //     场景            单看水平H4K5       + 垂直 2/3 投票
+    //     纯噪声 σ8/σ10       0 个              0 个                  ✅
+    //     物体密度 0.7     35 个碎片/最大89095  5 个/最大 96194       ✅
+    //     物体密度 0.8     26 个碎片/最大97481  2 个/最大 99322       ✅
+    //   （数值 = 连通域数/最大连通域面积；连通域数必须 ≤4 才不挤占 conn_label 的 NEG=8）
+    //
+    //   实现：用 2 个 1-bit 行缓存存「水平窗通过」信号，跨 3 行做 2/3 多数投票。
+    //
+    //   ⚠ 列对齐（line_delay_ram 读写同址会带来 1 列滞后，级联累加）：
+    //     K1 在周期 n = 上一行、列 A_px(n)-1 的 keep
+    //     K2 在周期 n = 上两行、列 A_px(n)-2 的 keep
+    //     故把「本行 keep」延 2 拍、K1 延 1 拍、K2 不延 ⇒ 三者都落在列 A_px(n)-2 ✅
+    //=========================================================================
+    wire        K1_raw, K2_raw;
+    reg         R_cur1, R_cur2, R_k1;
+    reg [1:0]   R_pre_de, R_pre_fd;
+    reg [1:0]   R_pre_mr, R_pre_mg, R_pre_mb;
+    reg [21:0]  R_pre_px;      // 2 拍 × 11bit
+    reg [19:0]  R_pre_py;      // 2 拍 × 10bit
+
+    line_delay_ram #(
+        .IMG_WIDTH ( 1280 ),
+        .ADDR_W    ( 11   ),
+        .DW        ( 1    )
+    ) u_lb_keep1 (
+        .clk    ( clk    ),
+        .rst_n  ( rst_n  ),
+        .I_wen  ( A_de   ),      // 与 W_keep 同拍的有效信号
+        .I_addr ( A_px[10:0] ),
+        .I_data ( W_keep ),
+        .O_data ( K1_raw )
+    );
+
+    line_delay_ram #(
+        .IMG_WIDTH ( 1280 ),
+        .ADDR_W    ( 11   ),
+        .DW        ( 1    )
+    ) u_lb_keep2 (
+        .clk    ( clk    ),
+        .rst_n  ( rst_n  ),
+        .I_wen  ( A_de   ),
+        .I_addr ( A_px[10:0] ),
+        .I_data ( K1_raw ),
+        .O_data ( K2_raw )
+    );
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            R_cur1 <= 1'b0; R_cur2 <= 1'b0; R_k1 <= 1'b0;
+            R_pre_de <= 2'd0; R_pre_fd <= 2'd0;
+            R_pre_mr <= 2'd0; R_pre_mg <= 2'd0; R_pre_mb <= 2'd0;
+            R_pre_px <= 22'd0; R_pre_py <= 20'd0;
+        end else begin
+            // 列对齐：本行 keep 延 2、K1 延 1、K2 不延
+            R_cur1 <= W_keep;
+            R_cur2 <= R_cur1;
+            R_k1   <= K1_raw;
+            // 「其它信号」同步延 2 拍（与投票结果同一列）
+            R_pre_de <= {R_pre_de[0], A_de};
+            R_pre_fd <= {R_pre_fd[0], A_fd};
+            R_pre_mr <= {R_pre_mr[0], A_mr};
+            R_pre_mg <= {R_pre_mg[0], A_mg};
+            R_pre_mb <= {R_pre_mb[0], A_mb};
+            R_pre_px <= {R_pre_px[10:0], A_px};
+            R_pre_py <= {R_pre_py[9:0], A_py};
+        end
+    end
+
+    //  跨 3 行多数投票（VER_ROWS/VER_NEED 可调；默认 2/3）
+    wire [1:0] W_vote = {1'b0, R_cur2} + {1'b0, R_k1} + {1'b0, K2_raw};
+    wire       W_vote_ok = (W_vote >= VER_NEED[1:0]);
+
+    wire W_mask_dspk = ENABLE ? (W_vote_ok & R_cur2) : R_cur2;
+
+    //  ★ 投票结果 / 延后 2 拍的其它信号，就是新的「对齐基准」A2_*
+    wire        A2_de = R_pre_de[1];
+    wire        A2_fd = R_pre_fd[1];
+    wire        A2_mr = R_pre_mr[1];
+    wire        A2_mg = R_pre_mg[1];
+    wire        A2_mb = R_pre_mb[1];
+    wire [10:0] A2_px = R_pre_px[21:11];
+    wire [9:0]  A2_py = R_pre_py[19:10];
 
     //=========================================================================
     //  3. 预延时链（深度 EQ）：把「其它信号」拉到与 W_keep 同一时刻
@@ -216,13 +308,13 @@ module mask_despeckle #(
             end
         end else begin
             C_mask_sr[0] <= W_mask_dspk;
-            C_de_sr  [0] <= A_de;
-            C_fd_sr  [0] <= A_fd;
-            C_mr_sr  [0] <= A_mr;
-            C_mg_sr  [0] <= A_mg;
-            C_mb_sr  [0] <= A_mb;
-            C_px_sr  [0] <= A_px;
-            C_py_sr  [0] <= A_py;
+            C_de_sr  [0] <= A2_de;
+            C_fd_sr  [0] <= A2_fd;
+            C_mr_sr  [0] <= A2_mr;
+            C_mg_sr  [0] <= A2_mg;
+            C_mb_sr  [0] <= A2_mb;
+            C_px_sr  [0] <= A2_px;
+            C_py_sr  [0] <= A2_py;
             for (m = 1; m < DCH; m = m + 1) begin
                 C_mask_sr[m] <= C_mask_sr[m-1];
                 C_de_sr  [m] <= C_de_sr  [m-1];

@@ -1,26 +1,35 @@
 //=============================================================================
-//  tb_mask_despeckle.v —— mask_despeckle 自检（对齐 + 去斑效果）
+//  tb_mask_despeckle.v —— mask_despeckle 自检（水平去斑 + 垂直投票 + 对齐）
 //=============================================================================
-//  验证两件事：
-//    ① **对齐**：O_mask / O_mask_r / O_de / O_pix_x / O_pix_y / O_frame_done
-//              必须是**同一像素**，只是整体延后 LAT 拍。
-//    ② **去斑**：孤立单点被删；实心游程保留（两端各缩 ~HALF 像素）。
+//  验证三件事：
+//    ① **水平去斑**：孤立单点被删；足够宽的实心块保留。
+//    ② **垂直投票**：只出现 1 行的横条被删；连续多行的块保留。
+//    ③ **对齐**：输出保留像素的包围盒必须与输入吻合（列/行都不能偏），
+//              且 O_mask_r 必须是同一像素的颜色。
 //
 //  用法：
-//    iverilog -g2005 -o t.vvp tb_mask_despeckle.v mask_despeckle.v && vvp t.vvp
+//    iverilog -g2005 -o t.vvp tb_mask_despeckle.v mask_despeckle.v \
+//             ../line_delay_ram.v && vvp t.vvp
 //=============================================================================
 
 `timescale 1ns / 1ps
 
 module tb_mask_despeckle;
 
-    localparam integer HALF = 5;
-    localparam integer KMIN = 10;
-    localparam integer DCH  = 2;
-    localparam integer LAT  = HALF + 1 + DCH;
+    localparam integer HALF     = 4;
+    localparam integer KMIN     = 5;
+    localparam integer VER_ROWS = 3;
+    localparam integer VER_NEED = 2;
+    localparam integer DCH      = 2;
+
+    // ---- 画面尺寸（小画面便于核对）----
+    localparam integer NW = 64;      // 一行有效像素
+    localparam integer NH = 10;      // 行数
+    localparam integer BLK_X0 = 20, BLK_X1 = 39;   // 实心块列范围
+    localparam integer BLK_Y0 = 3,  BLK_Y1 = 7;    // 实心块行范围
 
     reg clk = 0, rst_n = 0;
-    always #5 clk = ~clk;          // 100 MHz
+    always #5 clk = ~clk;
 
     reg        I_de;
     reg        I_mask, I_mask_r, I_mask_g, I_mask_b, I_frame_done;
@@ -32,7 +41,8 @@ module tb_mask_despeckle;
     wire [9:0]  O_pix_y;
 
     mask_despeckle #(
-        .HALF(HALF), .KMIN(KMIN), .DCH(DCH), .ENABLE(1)
+        .HALF(HALF), .KMIN(KMIN), .VER_ROWS(VER_ROWS), .VER_NEED(VER_NEED),
+        .DCH(DCH), .ENABLE(1)
     ) dut (
         .clk(clk), .rst_n(rst_n),
         .I_de(I_de), .I_mask(I_mask),
@@ -46,115 +56,134 @@ module tb_mask_despeckle;
     );
 
     //------------------------------------------------------------------
-    // 输入序列：1 行 64 像素；然后 8 拍消隐
-    //   x=10        ：孤立单点（应被去斑删掉）
-    //   x=20..39    ：20 像素实心游程（应保留）
-    //   x=50..53    ：4 像素短游程（窗口内命中数 <5，两端应被削）
+    // 输入图样（整帧二维）
+    //   ① 实心块      rows 3..7, cols 20..39      → 中央应保留
+    //   ② 孤立单点    (row 2, col 55)             → 水平窗应删除
+    //   ③ 单行横条    (row 1, cols 30..38)        → 垂直投票应删除
+    //      ⚠ 特意放在**最上面一行**：它上下两行都空
+    //        （若放在紧挨实心块隔一行处，2/3 投票会合理地把它当成块的一部分而保留）
+    //   ④ 孤立单点    (row 5, col 5)              → 应删除
     //------------------------------------------------------------------
-    localparam integer NACT = 64;
-
-    integer err_cnt = 0;
-    integer n_checked = 0;
-
-    // 期望函数（软件模型，与 RTL 同构）
-    function automatic exp_keep(input integer x);
-        integer c, t;
+    function automatic in_hit(input integer x, input integer y);
         begin
-            c = 0;
-            for (t = -HALF; t <= HALF; t = t + 1) begin
-                if (x + t >= 0 && x + t < NACT) begin
-                    if ((x + t) == 10) c = c + 1;                     // 孤立点
-                    if ((x + t) >= 20 && (x + t) <= 39) c = c + 1;     // 实心游程
-                    if ((x + t) >= 50 && (x + t) <= 53) c = c + 1;     // 短游程
-                end
-            end
-            exp_keep = (c >= KMIN);
+            in_hit = 1'b0;
+            if (y >= BLK_Y0 && y <= BLK_Y1 && x >= BLK_X0 && x <= BLK_X1) in_hit = 1'b1;
+            if (y == 5 && x == 5)  in_hit = 1'b1;
+            if (y == 1 && x >= 30 && x <= 38) in_hit = 1'b1;
+            if (y == 2 && x == 55) in_hit = 1'b1;
         end
     endfunction
 
-    // 输入侧当前掩膜
-    function automatic in_mask(input integer x);
+    function automatic in_red(input integer x, input integer y);
         begin
-            in_mask = ((x == 10) || (x >= 20 && x <= 39) || (x >= 50 && x <= 53));
+            in_red = (y >= BLK_Y0 && y <= BLK_Y1 && x >= BLK_X0 && x <= BLK_X1);
         end
     endfunction
 
-    integer x;
-    integer lat_cnt;
+    //------------------------------------------------------------------
+    // 采集
+    //------------------------------------------------------------------
+    integer kx_min, kx_max, ky_min, ky_max;
+    integer n_keep, n_de;
+    integer err_align, err_lone, err_row9, err_blk_core, err_coord;
+
+    //------------------------------------------------------------------
+    // 行缓存初始化（仿真专用）
+    //   line_delay_ram 内部 mem 未初始化 ⇒ 前两行会读到 X，
+    //   这里显式清零，避免 X 传播干扰判读。
+    //------------------------------------------------------------------
+    integer mi;
+    initial begin
+        for (mi = 0; mi < 1280; mi = mi + 1) begin
+            tb_mask_despeckle.dut.u_lb_keep1.mem[mi] = 1'b0;
+            tb_mask_despeckle.dut.u_lb_keep2.mem[mi] = 1'b0;
+        end
+    end
+
+    integer x, y;
 
     initial begin
         $dumpfile("tb_mask_despeckle.vcd");
         $dumpvars(0, tb_mask_despeckle);
 
-        rst_n = 0; I_de = 0; I_mask = 0; I_mask_r = 0; I_mask_g = 0; I_mask_b = 0;
-        I_frame_done = 0; I_pix_x = 0; I_pix_y = 0;
+        kx_min = 100000; kx_max = 0; ky_min = 100000; ky_max = 0;
+        n_keep = 0; n_de = 0;
+        err_align = 0; err_lone = 0; err_row9 = 0; err_blk_core = 0; err_coord = 0;
+
+        rst_n = 0; I_de = 0; I_mask = 0; I_mask_r = 0; I_mask_g = 0;
+        I_mask_b = 0; I_frame_done = 0; I_pix_x = 0; I_pix_y = 0;
         repeat (4) @(posedge clk);
         rst_n = 1;
         repeat (2) @(posedge clk);
 
-        // ---- 第 1 行：有效像素 ----
-        I_pix_y = 10'd0;
-        for (x = 0; x < NACT; x = x + 1) begin
-            @(negedge clk);
-            I_de       = 1'b1;
-            I_pix_x    = x[10:0];
-            I_mask     = in_mask(x);
-            // 颜色：x 在实心区用红，其余用绿，便于核对「颜色是否同像素」
-            I_mask_r   = (x >= 20 && x <= 39);
-            I_mask_g   = ~(x >= 20 && x <= 39);
-            I_mask_b   = 1'b0;
-            I_frame_done = (x == 0);
+        // ---- 驱动一帧 ----
+        for (y = 0; y < NH; y = y + 1) begin
+            for (x = 0; x < NW; x = x + 1) begin
+                @(negedge clk);
+                I_de       = 1'b1;
+                I_pix_x    = x[10:0];
+                I_pix_y    = y[9:0];
+                I_mask     = in_hit(x, y);
+                I_mask_r   = in_red(x, y);
+                I_mask_g   = ~in_red(x, y);
+                I_mask_b   = 1'b0;
+                I_frame_done = (x == 0 && y == 0);
+            end
+            for (x = 0; x < 8; x = x + 1) begin
+                @(negedge clk);
+                I_de = 1'b0; I_mask = 1'b0; I_mask_r = 0; I_mask_g = 0;
+                I_pix_x = 11'd0; I_frame_done = 1'b0;
+            end
         end
-        // ---- 消隐 8 拍（窗口自然清空）----
-        for (x = 0; x < 8; x = x + 1) begin
-            @(negedge clk);
-            I_de = 1'b0; I_mask = 1'b0; I_mask_r = 0; I_mask_g = 0;
-            I_pix_x = 11'd0; I_frame_done = 1'b0;
-        end
+        @(negedge clk);
+        I_de = 1'b0; I_mask = 1'b0; I_mask_r = 0; I_mask_g = 0;
 
-        // ---- 让流水流干 ----
-        repeat (LAT + 4) @(posedge clk);
+        repeat (3 * (NW + 10) + 60) @(posedge clk);
 
-        //------------------------------------------------------------------
-        // 校验：把仿真期间记录的输出与软件模型对比
-        //   —— 由 record 块在每拍采集（见下）
-        //------------------------------------------------------------------
-        if (err_cnt == 0)
-            $display("\n[PASS] mask_despeckle：%0d 个有效像素全部一致（对齐 + 去斑）", n_checked);
+        // ---- 报告 ----
+        $display("");
+        $display("  O_de 有效拍数        : %0d  (期望 %0d)", n_de, NW*NH);
+        $display("  保留像素数           : %0d", n_keep);
+        $display("  保留像素包围盒       : x[%0d..%0d]  y[%0d..%0d]", kx_min, kx_max, ky_min, ky_max);
+        $display("  实心块输入范围       : x[%0d..%0d]  y[%0d..%0d]", BLK_X0, BLK_X1, BLK_Y0, BLK_Y1);
+        $display("  ---");
+        $display("  孤立点被保留(应0)    : %0d", err_lone);
+        $display("  单行横条被保留(应0)  : %0d", err_row9);
+        $display("  实心块核心被删(应0)  : %0d", err_blk_core);
+        $display("  颜色错拍(应0)        : %0d", err_align);
+        $display("  坐标越界(应0)        : %0d", err_coord);
+
+        if (err_lone == 0 && err_row9 == 0 && err_blk_core == 0 &&
+            err_align == 0 && err_coord == 0 && n_keep > 0 &&
+            kx_min >= BLK_X0 && kx_max <= BLK_X1 &&
+            ky_min >= BLK_Y0 && ky_max <= BLK_Y1)
+            $display("\n[PASS] mask_despeckle：水平去斑 + 垂直投票 + 对齐 全部通过");
         else
-            $display("\n[FAIL] mask_despeckle：%0d/%0d 处不一致", err_cnt, n_checked);
+            $display("\n[FAIL] mask_despeckle：见上方计数");
         $finish;
     end
 
-    //------------------------------------------------------------------
-    // 采集与校验：在 negedge 采样（输出是 posedge 寄存的，negedge 时已稳定）
-    //------------------------------------------------------------------
-    integer ox;
     always @(negedge clk) begin
         if (rst_n && O_de) begin
-            ox = O_pix_x;
-            n_checked = n_checked + 1;
+            n_de = n_de + 1;
+            if (O_pix_x >= NW || O_pix_y >= NH) err_coord = err_coord + 1;
+            if (O_mask) begin
+                n_keep = n_keep + 1;
+                if (O_pix_x < kx_min) kx_min = O_pix_x;
+                if (O_pix_x > kx_max) kx_max = O_pix_x;
+                if (O_pix_y < ky_min) ky_min = O_pix_y;
+                if (O_pix_y > ky_max) ky_max = O_pix_y;
 
-            // ① 掩膜是否符合软件模型
-            if (O_mask !== exp_keep(ox)) begin
-                err_cnt = err_cnt + 1;
-                if (err_cnt <= 12)
-                    $display("  [mask] x=%0d  O_mask=%b  期望=%b", ox, O_mask, exp_keep(ox));
-            end
+                if (O_pix_y == 5 && O_pix_x == 5)  err_lone = err_lone + 1;
+                if (O_pix_y == 2 && O_pix_x == 55) err_lone = err_lone + 1;
+                if (O_pix_y == 1) err_row9 = err_row9 + 1;
 
-            // ② 颜色是否与同一像素的输入一致
-            if (O_mask_r !== (ox >= 20 && ox <= 39)) begin
-                err_cnt = err_cnt + 1;
-                if (err_cnt <= 12)
-                    $display("  [align] x=%0d  O_mask_r=%b 期望=%b（颜色错拍！）",
-                             ox, O_mask_r, (ox >= 20 && ox <= 39));
-            end
-
-            // ③ 坐标必须落在输入范围内（对齐 sanity）
-            if (O_pix_x >= NACT) begin
-                err_cnt = err_cnt + 1;
-                if (err_cnt <= 12)
-                    $display("  [coord] O_pix_x=%0d 越界", O_pix_x);
+                if (O_mask_r !== (in_red(O_pix_x, O_pix_y) ? 1'b1 : 1'b0))
+                    err_align = err_align + 1;
+            end else begin
+                if (O_pix_y >  BLK_Y0 + (HALF-1) && O_pix_y <  BLK_Y1 - (HALF-1) &&
+                    O_pix_x >  BLK_X0 + (HALF+2) && O_pix_x <  BLK_X1 - (HALF+2))
+                    err_blk_core = err_blk_core + 1;
             end
         end
     end
