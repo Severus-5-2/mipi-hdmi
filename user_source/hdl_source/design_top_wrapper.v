@@ -1208,8 +1208,19 @@ isp_top u_isp_top (
         end
     endgenerate
 
+    //------------------------------------------------------------------
+    //  ★ 2026-10-12：掩膜叠加显示开关
+    //    现场反馈：检测掩膜以绿色小点铺满画面（人/墙/帘子上全是）且逐帧乱跳，
+    //              干扰观察、也看不出真实目标。
+    //    1 = 显示：每个「掩膜命中」像素被纯替换成纯绿 0x00FF00（调试用）
+    //    0 = 不显示（★当前默认）
+    //    ⚠ 关掉的只是**显示**：检测 → 连通域 → target_bus → 画框 整条链路不受影响。
+    //      重新综合后若想直接看掩膜效果（确认判据修好了），把 0 改成 1 再综合一次即可。
+    //------------------------------------------------------------------
+    localparam MASK_OVERLAY_EN = 0;
+
     assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
-    assign S_ovl_hit    = S_mask_hit | S_box_hit | S_coord_hit;
+    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_mask_hit : 1'b0) | S_box_hit | S_coord_hit;
     assign S_ovl_color  = S_coord_hit ? S_coord_color :
                           (S_box_hit  ? S_box_color  : S_mask_color);
 

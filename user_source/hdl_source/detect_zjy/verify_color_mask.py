@@ -127,7 +127,7 @@ class RtlParams(object):
         for m in re.finditer(r"\b(USE_ABS_WINDOW)\s*=\s*(\d+)", code):
             self.param[m.group(1)] = int(m.group(2))
 
-        for name in ("Y_MIN", "MAG_TH", "RATIO10", "USE_ABS_WINDOW",
+        for name in ("Y_MIN", "MAG_TH", "RATIO10", "USE_ABS_WINDOW", "G_AXIS_TH",
                      "RED_CB_LO", "RED_CB_HI", "RED_CR_LO", "RED_CR_HI",
                      "BLUE_CB_LO", "BLUE_CB_HI", "BLUE_CR_LO", "BLUE_CR_HI",
                      "GREEN_CB_LO", "GREEN_CB_HI", "GREEN_CR_LO", "GREEN_CR_HI"):
@@ -144,7 +144,10 @@ class RtlParams(object):
                      "w_dcr <= 9'sd0",
                      "w_rcb10 >= w_lim_cr",
                      "w_dcb < 9'sd0",
-                     "w_dcr <  9'sd0"):
+                     "w_dcr <  9'sd0",
+                     # ★ 2026-10-12 新增：绿判据双轴门限
+                     "w_adcb >= G_AXIS_TH",
+                     "w_adcr >= G_AXIS_TH"):
             if frag not in self.src:
                 raise RuntimeError("RTL 中未找到判据片段 %r，模型可能已过期" % frag)
 
@@ -159,8 +162,9 @@ class RtlParams(object):
               % (self.round_const, self.shift, self.chroma_offset,
                  self.clamp_lo, self.clamp_hi))
         print("   亮度门控 Y_MIN=%d" % self.param["Y_MIN"])
-        print("   ★v2 自适应判据: MAG_TH=%d, RATIO10=%d（比值 ≤ %d/10）"
-              % (self.param["MAG_TH"], self.param["RATIO10"], self.param["RATIO10"]))
+        print("   ★v2 自适应判据: MAG_TH=%d, RATIO10=%d（比值 ≤ %d/10）, G_AXIS_TH=%d（绿双轴）"
+              % (self.param["MAG_TH"], self.param["RATIO10"],
+                 self.param["RATIO10"], self.param["G_AXIS_TH"]))
         print("   兼容旧窗口 USE_ABS_WINDOW=%d" % self.param["USE_ABS_WINDOW"])
         print()
 
@@ -208,9 +212,11 @@ class RtlParams(object):
             adcr = abs(dcr)
             mag = adcb + adcr
             mag_ok = mag >= p["MAG_TH"]
+            # ★ 2026-10-12：绿判据新增双轴门限（与 RTL 的 w_g_axis_ok 同构）
+            g_axis_ok = (adcb >= p["G_AXIS_TH"]) and (adcr >= p["G_AXIS_TH"])
             m_r = mag_ok and (dcr > 0) and (dcb <= 0) and (adcr * 10 >= adcb * p["RATIO10"])
             m_b = mag_ok and (dcb > 0) and (dcr <= 0) and (adcb * 10 >= adcr * p["RATIO10"])
-            m_g = mag_ok and (dcb < 0) and (dcr < 0)
+            m_g = mag_ok and (dcb < 0) and (dcr < 0) and g_axis_ok
 
         return {"y": cy, "cb": ccb, "cr": ccr,
                 "q_y": cy, "q_cb": ccb, "q_cr": ccr,

@@ -36,11 +36,37 @@ sim_lowlight_mask.py  ——  低曝光场景下掩膜稳定性 / 检测完整�
   3. 对比「旧固定绝对窗口」与「v2 自适应判据」的检出率
   4. 扫 MAG_TH / RATIO10 / tgt_scale，输出推荐值
 
+=== 2026-10-12 追加：色度噪声误命中扫描（--noise）===
+【现场现象】下板后画面上**密布绿色小点**（掩膜叠加），人/墙/帘子上全是，
+            且逐帧乱跳，完全淹没真实目标 —— 不是"检测不全"，是"误命中爆炸"。
+
+【根因】传感器色度噪声 dcb/dcr 近似独立正态 N(0, σ)。v2 判据里
+  「mag ≥ MAG_TH 且 dcb<0 且 dcr<0」这一个绿的象限判据，
+  在 σ=10 时吃掉 **20.3%** 的像素；σ=12 时 25.9%。
+  红/蓝有比值约束（要求方向性强）误命中低得多；**绿只有象限+幅度，是主要漏口**。
+  噪声让边缘像素在门限附近随机跨越 ⇒ 逐帧乱跳。
+
+【处置（2026-10-12，已在 RTL 落地）】
+  ① MAG_TH  16 → 48
+  ② 绿判据新增「双轴门限」G_AXIS_TH=20：|dcb| 与 |dcr| 必须各自达标
+     （绿在 (Cb,Cr) 平面是对角方向，两轴同向同量级才是真绿；
+       噪声两轴独立，常常一轴大一小 ⇒ 被挡）
+
+【实测数据（由本脚本 --noise 模式产出，可复现）】
+  背景误命中率（%）：
+      配置                       σ=4    σ=6    σ=8    σ=10   σ=12   σ=15
+      旧 MAG_TH=16 绿无轴限       0.39   5.08  12.94  20.27  25.92  31.78
+      新 MAG_TH=48 绿轴≥20        0.00   0.00   0.00   0.04   0.28   1.46
+  目标可检出的最低亮度：绿 10%→25%，红 9%→28%，蓝 11%→32%
+  ⇒ 35% 亮度三色仍 100% 可检（v2 当初的设计承诺不变），
+    代价是 25% 以下极暗场景会漏 —— 属「宁缺毋滥」的取舍。
+
 用法：
     python sim_lowlight_mask.py                 # 默认扫参数
     python sim_lowlight_mask.py --detail        # 附带逐目标明细
     python sim_lowlight_mask.py --sweep mag     # 只扫 MAG_TH
     python sim_lowlight_mask.py --sweep scale   # 扫目标亮度缩放倍率（复现崩溃点表）
+    python sim_lowlight_mask.py --noise         # ★色度噪声误命中扫描（2026-10-12）
 """
 
 import argparse
@@ -254,10 +280,104 @@ def eval_scene(name, scene, y_min, seeds=3):
     )
 
 
+# ---------------------------------------------------------------------------
+# ★ 2026-10-12：色度噪声误命中扫描（--noise）
+#   与 RTL detect_color_mask.v 的自动判据分支**逐字同构**
+# ---------------------------------------------------------------------------
+def classify_v2(cb, cr, mag_th, g_axis_th=0, ratio10=13):
+    """返回 cls: 0=红 1=蓝 2=绿 3=未命中（与 RTL 优先级一致：红>蓝>绿）"""
+    dcb = cb - 128
+    dcr = cr - 128
+    adcb, adcr = abs(dcb), abs(dcr)
+    mag = adcb + adcr
+    if mag < mag_th:
+        return 3
+    if dcr > 0 and dcb <= 0 and adcr * 10 >= adcb * ratio10:
+        return 0
+    if dcb > 0 and dcr <= 0 and adcb * 10 >= adcr * ratio10:
+        return 1
+    if dcb < 0 and dcr < 0:
+        if g_axis_th and (adcb < g_axis_th or adcr < g_axis_th):
+            return 3
+        return 2
+    return 3
+
+
+def _bg_false_rate(sigma, mag_th, g_axis_th, n=200000, seed=7):
+    """背景色度噪声 dcb/dcr ~ N(0,σ) 独立，统计非零（误命中）比例。"""
+    rnd = random.Random(seed)
+    hit = 0
+    for _ in range(n):
+        dcb = rnd.gauss(0, sigma)
+        dcr = rnd.gauss(0, sigma)
+        if classify_v2(128 + dcb, 128 + dcr, mag_th, g_axis_th) != 3:
+            hit += 1
+    return hit / n
+
+
+def _detect_floor(mag_th, g_axis_th, cls, ratio10=13):
+    """某配置下，纯色目标可被检出的最低亮度（步长 1%）。"""
+    rgb = {0: (255, 0, 0), 1: (0, 0, 255), 2: (0, 255, 0)}[cls]
+    floor = None
+    for pct in range(100, 0, -1):
+        s = pct / 100.0
+        r, g, b = (int(c * s) for c in rgb)
+        y, cb, cr = rgb2ycbcr(r, g, b)
+        if classify_v2(cb, cr, mag_th, g_axis_th, ratio10) == cls:
+            floor = pct
+    return floor
+
+
+def scan_noise():
+    sigmas = [4, 6, 8, 10, 12, 15]
+    configs = [
+        ("旧 MAG_TH=16 绿无轴限", 16, 0),
+        ("新 MAG_TH=48 绿轴≥20 (当前RTL)", 48, 20),
+        ("候选A MAG_TH=32 绿轴≥12", 32, 12),
+        ("候选B MAG_TH=40 绿轴≥16", 40, 16),
+        ("候选C MAG_TH=64 绿轴≥24", 64, 24),
+    ]
+
+    print('=' * 92)
+    print('色度噪声误命中扫描（--noise）  模型：dcb/dcr ~ N(0,σ) 独立')
+    print('=' * 92)
+    print('背景误命中率（%）—— 数值 = 整幅画面被判成目标的比例')
+    hdr = '%-34s' % '配置' + ''.join('σ=%-6d' % s for s in sigmas)
+    print(hdr)
+    print('-' * 92)
+    for name, mt, ga in configs:
+        row = '%-34s' % name
+        for s in sigmas:
+            row += '%6.2f  ' % (_bg_false_rate(s, mt, ga) * 100)
+        print(row)
+
+    print()
+    print('目标可检出的最低亮度（纯红/绿/蓝，步长 1%）')
+    print('%-34s %8s %8s %8s' % ('配置', '红', '绿', '蓝'))
+    print('-' * 92)
+    for name, mt, ga in configs:
+        fr = _detect_floor(mt, ga, 0)
+        fg = _detect_floor(mt, ga, 2)
+        fb = _detect_floor(mt, ga, 1)
+        print('%-34s %7s%% %7s%% %7s%%' % (name, fr, fg, fb))
+
+    print()
+    print('判读要点')
+    print('  · 下板绿点铺满画面 ⇔ 背景误命中率过高（>5% 肉眼就是"满屏噪点"）')
+    print('  · 误命中率与「最低可检亮度」是此消彼长的取舍，按现场光照选')
+    print('  · 现场光照正常（目标亮度 ≥35%）时，MAG_TH=48 / G_AXIS_TH=20 是安全点')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--detail', action='store_true')
+    ap.add_argument('--noise', action='store_true',
+                    help='色度噪声误命中扫描（2026-10-12 现场问题）')
     args = ap.parse_args()
+
+    if args.noise:
+        scan_noise()
+        return
 
     Y_MIN_CANDIDATES = [0, 16, 24, 32, 40, 48, 64, 80]
 
