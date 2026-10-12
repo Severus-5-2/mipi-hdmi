@@ -141,6 +141,12 @@ module mask_despeckle #(
     end
 
     wire W_keep = (S_cnt >= KMIN[3:0]);
+    //  ★ 保险条款：水平窗**几乎全满**（≥WID-1）⇒ 该像素确定处在「成片区域」内部，
+    //    无需再看垂直投票，直接放行。
+    //    作用：即使行缓存出了任何问题（未推断、地址错、读写语义不符），
+    //    目标物体的**核心区域**也一定能活下来 —— 避免「整片掩膜被清空」这种全崩。
+    //    代价：噪声几乎不受影响（相关噪声在 9 像素窗内命中 8 个的概率极低）。
+    wire W_hstrong = (S_cnt >= (WID-1));
 
     //=========================================================================
     //  2b. ★ 垂直「多数投票」（2026-10-12 最终方案）
@@ -164,8 +170,20 @@ module mask_despeckle #(
     //     K2 在周期 n = 上两行、列 A_px(n)-2 的 keep
     //     故把「本行 keep」延 2 拍、K1 延 1 拍、K2 不延 ⇒ 三者都落在列 A_px(n)-2 ✅
     //=========================================================================
+    //  ★★ 前置声明（非常重要，2026-10-12 现场踩坑）
+    //    下面第 2b 节要**先用** A_de / A_px 等信号，而它们的赋值在第 3 节。
+    //    Verilog 允许"先用后声明"（iverilog 能正确解析，仿真/TB 全过），
+    //    但 TD/Synplify 会为**先出现**的标识符建一个**隐式 1-bit 网**——
+    //    那个网没有驱动、恒为 0 ⇒ 行缓存 I_wen 永远为 0 ⇒ 缓存从未写入
+    //    ⇒ 垂直投票永远凑不满票数 ⇒ **整片掩膜被清空**（现场现象：绿点和框全没了）。
+    //    ⇒ 必须先显式声明，第 3 节只做 assign。
+    wire        A_de, A_fd, A_mr, A_mg, A_mb;
+    wire [10:0] A_px;
+    wire [9:0]  A_py;
+
     wire        K1_raw, K2_raw;
     reg         R_cur1, R_cur2, R_k1;
+    reg         R_hs1, R_hs2;          // 「水平窗几乎全满」延 2 拍（保险条款）
     reg [1:0]   R_pre_de, R_pre_fd;
     reg [1:0]   R_pre_mr, R_pre_mg, R_pre_mb;
     reg [21:0]  R_pre_px;      // 2 拍 × 11bit
@@ -200,6 +218,7 @@ module mask_despeckle #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             R_cur1 <= 1'b0; R_cur2 <= 1'b0; R_k1 <= 1'b0;
+            R_hs1 <= 1'b0; R_hs2 <= 1'b0;
             R_pre_de <= 2'd0; R_pre_fd <= 2'd0;
             R_pre_mr <= 2'd0; R_pre_mg <= 2'd0; R_pre_mb <= 2'd0;
             R_pre_px <= 22'd0; R_pre_py <= 20'd0;
@@ -208,6 +227,8 @@ module mask_despeckle #(
             R_cur1 <= W_keep;
             R_cur2 <= R_cur1;
             R_k1   <= K1_raw;
+            R_hs1  <= W_hstrong;      // 保险条款同样延 2 拍对齐
+            R_hs2  <= R_hs1;
             // 「其它信号」同步延 2 拍（与投票结果同一列）
             R_pre_de <= {R_pre_de[0], A_de};
             R_pre_fd <= {R_pre_fd[0], A_fd};
@@ -220,8 +241,9 @@ module mask_despeckle #(
     end
 
     //  跨 3 行多数投票（VER_ROWS/VER_NEED 可调；默认 2/3）
+    //  再 OR 上「保险条款」：水平窗几乎全满的像素无条件放行
     wire [1:0] W_vote = {1'b0, R_cur2} + {1'b0, R_k1} + {1'b0, K2_raw};
-    wire       W_vote_ok = (W_vote >= VER_NEED[1:0]);
+    wire       W_vote_ok = (W_vote >= VER_NEED[1:0]) | R_hs2;
 
     wire W_mask_dspk = ENABLE ? (W_vote_ok & R_cur2) : R_cur2;
 
@@ -277,13 +299,13 @@ module mask_despeckle #(
     end
 
     //  此刻：W_mask_dspk 与 E_*_sr[EQ-1] 是**同一像素**
-    wire        A_de   = E_de_sr[EQ-1];
-    wire        A_fd   = E_fd_sr[EQ-1];
-    wire        A_mr   = E_mr_sr[EQ-1];
-    wire        A_mg   = E_mg_sr[EQ-1];
-    wire        A_mb   = E_mb_sr[EQ-1];
-    wire [10:0] A_px   = E_px_sr[EQ-1];
-    wire [9:0]  A_py   = E_py_sr[EQ-1];
+    assign A_de   = E_de_sr[EQ-1];
+    assign A_fd   = E_fd_sr[EQ-1];
+    assign A_mr   = E_mr_sr[EQ-1];
+    assign A_mg   = E_mg_sr[EQ-1];
+    assign A_mb   = E_mb_sr[EQ-1];
+    assign A_px   = E_px_sr[EQ-1];
+    assign A_py   = E_py_sr[EQ-1];
 
     //=========================================================================
     //  4. 公共延迟链（深度 DCH）：统一输出延迟，兼作输出寄存改善时序
