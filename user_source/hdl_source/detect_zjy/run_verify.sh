@@ -49,6 +49,9 @@ SIMDIR="$(mktemp -d 2>/dev/null || echo "${HERE}/_sim_tmp")"
 mkdir -p "$SIMDIR"
 trap 'rm -rf "$SIMDIR"' EXIT
 cp "$HERE/detect_color_mask.v" "$HERE/tb_detect_color_mask.v" "$SIMDIR/"
+# 去斑模块自检需要行缓存（工程已有的公共模块）
+cp "$HERE/mask_despeckle.v" "$HERE/tb_mask_despeckle.v" "$SIMDIR/" 2>/dev/null || true
+cp "$HERE/../line_delay_ram.v" "$SIMDIR/" 2>/dev/null || true
 cd "$SIMDIR"
 
 # ---------- 3. 编译 ----------
@@ -67,3 +70,22 @@ echo "== 对拍 =="
 "$PYTHON_BIN" "$HERE/verify_color_mask.py" \
     --rtl "$HERE/detect_color_mask.v" \
     --out "$SIMDIR/rtl_out.txt"
+
+# ---------- 6. 去斑模块自检（mask_despeckle）----------
+#   验证：水平窗去斑 + 跨行垂直投票 + 列/行对齐
+echo
+echo "== 去斑模块自检（mask_despeckle）=="
+if [ -f "$SIMDIR/mask_despeckle.v" ] && [ -f "$SIMDIR/tb_mask_despeckle.v" ]; then
+    "$IVERILOG_BIN" -g2005 -o dspk.out mask_despeckle.v tb_mask_despeckle.v \
+        line_delay_ram.v 2>/dev/null || {
+        echo "!! 去斑模块编译失败"; exit 1; }
+    DSPK_OUT="$("$VVP_BIN" dspk.out 2>&1)"
+    echo "$DSPK_OUT" | grep -v '^\$dump' | sed '/^$/d' | tail -12
+    if echo "$DSPK_OUT" | grep -q '\[PASS\]'; then
+        : # 通过
+    else
+        echo "!! 去斑模块自检未通过"; exit 1
+    fi
+else
+    echo "(跳过：未找到 mask_despeckle.v / tb_mask_despeckle.v)"
+fi
