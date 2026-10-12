@@ -14,8 +14,8 @@
 
 module tb_mask_despeckle;
 
-    localparam integer HALF = 4;
-    localparam integer KMIN = 5;
+    localparam integer HALF = 5;
+    localparam integer KMIN = 10;
     localparam integer DCH  = 2;
     localparam integer LAT  = HALF + 1 + DCH;
 

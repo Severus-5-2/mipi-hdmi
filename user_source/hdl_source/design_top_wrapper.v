@@ -1154,8 +1154,8 @@ isp_top u_isp_top (
                          S_det_mask_g ? `CLS_GREEN : `CLS_UNKNOWN;
 
     mask_despeckle #(
-        .HALF       ( 4 ),      // 水平半窗（左右各 4 ⇒ 9 像素窗）
-        .KMIN       ( 5 ),      // 窗内至少 5 个命中才保留
+        .HALF       ( 5 ),      // 水平半窗（左右各 5 ⇒ 11 像素窗）
+        .KMIN       ( 10 ),     // 窗内至少 10 个命中才保留
         .DCH        ( 2 ),      // 公共输出延迟链深度
         .ENABLE     ( 1 )       // 1 = 启用去斑；0 = 旁路（仅延迟）
     )u_mask_despeckle(
