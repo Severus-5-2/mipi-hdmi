@@ -52,6 +52,11 @@ cp "$HERE/detect_color_mask.v" "$HERE/tb_detect_color_mask.v" "$SIMDIR/"
 # 去斑模块自检需要行缓存（工程已有的公共模块）
 cp "$HERE/mask_despeckle.v" "$HERE/tb_mask_despeckle.v" "$SIMDIR/" 2>/dev/null || true
 cp "$HERE/../line_delay_ram.v" "$SIMDIR/" 2>/dev/null || true
+# D5/D6：几何分类 + 类别数量 OSD
+cp "$HERE/shape_class.v" "$HERE/tb_shape_class.v" "$SIMDIR/" 2>/dev/null || true
+cp "$HERE/osd_category.v" "$HERE/tb_osd_category.v" "$SIMDIR/" 2>/dev/null || true
+cp "$HERE/../osd_char_lib.v" "$SIMDIR/" 2>/dev/null || true
+cp "$HERE/../common_base/common_defs.vh" "$SIMDIR/" 2>/dev/null || true
 cd "$SIMDIR"
 
 # ---------- 3. 编译 ----------
@@ -89,3 +94,45 @@ if [ -f "$SIMDIR/mask_despeckle.v" ] && [ -f "$SIMDIR/tb_mask_despeckle.v" ]; th
 else
     echo "(跳过：未找到 mask_despeckle.v / tb_mask_despeckle.v)"
 fi
+
+# ---------- 7. 几何形状分类自检（shape_class，D5）----------
+#   验证：填充度判据（方/圆/三角）+ 无效槽 + 阈值边界
+echo
+echo "== 几何分类自检（shape_class）=="
+if [ -f "$SIMDIR/shape_class.v" ] && [ -f "$SIMDIR/tb_shape_class.v" ]; then
+    "$IVERILOG_BIN" -g2005 -o shp.out shape_class.v tb_shape_class.v 2>/dev/null || {
+        echo "!! 几何分类模块编译失败"; exit 1; }
+    SHP_OUT="$("$VVP_BIN" shp.out 2>&1)"
+    echo "$SHP_OUT" | grep -v '^\$dump' | sed '/^$/d' | tail -8
+    if echo "$SHP_OUT" | grep -q '\[PASS\]'; then
+        : # 通过
+    else
+        echo "!! 几何分类自检未通过"; exit 1
+    fi
+else
+    echo "(跳过：未找到 shape_class.v / tb_shape_class.v)"
+fi
+
+# ---------- 8. 类别数量 OSD 自检（osd_category，D6）----------
+#   验证：颜色/形状计数 + 22 个字符格渲染 + 复用字库数字
+echo
+echo "== 类别 OSD 自检（osd_category）=="
+if [ -f "$SIMDIR/osd_category.v" ] && [ -f "$SIMDIR/tb_osd_category.v" ]; then
+    "$IVERILOG_BIN" -g2005 -o cat.out osd_category.v tb_osd_category.v \
+        osd_char_lib.v 2>/dev/null || {
+        echo "!! 类别 OSD 模块编译失败"; exit 1; }
+    CAT_OUT="$("$VVP_BIN" cat.out 2>&1)"
+    echo "$CAT_OUT" | grep -E '^\[(OK|PASS|FAIL)\]' | tail -5
+    if echo "$CAT_OUT" | grep -q '\[PASS\]'; then
+        : # 通过
+    else
+        echo "!! 类别 OSD 自检未通过"; exit 1
+    fi
+else
+    echo "(跳过：未找到 osd_category.v / tb_osd_category.v)"
+fi
+
+echo
+echo "============================================================"
+echo "  detect_zjy 全量验证：以上各项全部 PASS"
+echo "============================================================"
