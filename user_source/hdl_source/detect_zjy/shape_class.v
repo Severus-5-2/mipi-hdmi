@@ -52,7 +52,7 @@
 //=============================================================================
 
 `timescale 1ns / 1ps
-`include "common_defs.vh"
+`include "../common_base/common_defs.vh"   // ★ 相对本文件目录（同 design_top_wrapper.v 的写法）
 
 module shape_class #(
     parameter integer N_SLOT = 4,          // 槽数（与 target_bus 一致）

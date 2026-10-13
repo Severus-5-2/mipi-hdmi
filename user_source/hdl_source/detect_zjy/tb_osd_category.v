@@ -6,7 +6,7 @@
 //  同时以字符串逐格比对字符码。
 //=============================================================================
 `timescale 1ns / 1ps
-`include "common_defs.vh"
+`include "../common_base/common_defs.vh"   // ★ 相对本文件目录
 
 module tb_osd_category;
 

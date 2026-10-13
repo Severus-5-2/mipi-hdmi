@@ -18,7 +18,7 @@
 //    槽3：f= 38.0% (area=3800)  → SHP_TRI  （>= 38 应判三角）
 //=============================================================================
 `timescale 1ns / 1ps
-`include "common_defs.vh"
+`include "../common_base/common_defs.vh"   // ★ 相对本文件目录
 
 module tb_shape_class;
 

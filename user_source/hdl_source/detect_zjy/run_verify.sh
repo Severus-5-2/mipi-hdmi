@@ -46,18 +46,22 @@ echo
 
 # ---------- 2. 临时仿真目录 ----------
 SIMDIR="$(mktemp -d 2>/dev/null || echo "${HERE}/_sim_tmp")"
-mkdir -p "$SIMDIR"
+# ⚠ 必须保留一层目录结构：detect_zjy/ 下的源码（shape_class / osd_category 及其 TB）
+#   用 `include "../common_base/common_defs.vh"`（与 design_top_wrapper.v 同一写法，
+#   这样 TD 综合时也能找到）⇒ 临时目录里要让 ../common_base/ 真实存在。
+mkdir -p "$SIMDIR/detect_zjy" "$SIMDIR/common_base"
 trap 'rm -rf "$SIMDIR"' EXIT
-cp "$HERE/detect_color_mask.v" "$HERE/tb_detect_color_mask.v" "$SIMDIR/"
+SIMD="$SIMDIR/detect_zjy"
+cp "$HERE/detect_color_mask.v" "$HERE/tb_detect_color_mask.v" "$SIMD/"
 # 去斑模块自检需要行缓存（工程已有的公共模块）
-cp "$HERE/mask_despeckle.v" "$HERE/tb_mask_despeckle.v" "$SIMDIR/" 2>/dev/null || true
-cp "$HERE/../line_delay_ram.v" "$SIMDIR/" 2>/dev/null || true
+cp "$HERE/mask_despeckle.v" "$HERE/tb_mask_despeckle.v" "$SIMD/" 2>/dev/null || true
+cp "$HERE/../line_delay_ram.v" "$SIMD/" 2>/dev/null || true
 # D5/D6：几何分类 + 类别数量 OSD
-cp "$HERE/shape_class.v" "$HERE/tb_shape_class.v" "$SIMDIR/" 2>/dev/null || true
-cp "$HERE/osd_category.v" "$HERE/tb_osd_category.v" "$SIMDIR/" 2>/dev/null || true
-cp "$HERE/../osd_char_lib.v" "$SIMDIR/" 2>/dev/null || true
-cp "$HERE/../common_base/common_defs.vh" "$SIMDIR/" 2>/dev/null || true
-cd "$SIMDIR"
+cp "$HERE/shape_class.v" "$HERE/tb_shape_class.v" "$SIMD/" 2>/dev/null || true
+cp "$HERE/osd_category.v" "$HERE/tb_osd_category.v" "$SIMD/" 2>/dev/null || true
+cp "$HERE/../osd_char_lib.v" "$SIMD/" 2>/dev/null || true
+cp "$HERE/../common_base/common_defs.vh" "$SIMDIR/common_base/" 2>/dev/null || true
+cd "$SIMD"
 
 # ---------- 3. 编译 ----------
 echo "== 编译 =="
@@ -80,7 +84,7 @@ echo "== 对拍 =="
 #   验证：水平窗去斑 + 跨行垂直投票 + 列/行对齐
 echo
 echo "== 去斑模块自检（mask_despeckle）=="
-if [ -f "$SIMDIR/mask_despeckle.v" ] && [ -f "$SIMDIR/tb_mask_despeckle.v" ]; then
+if [ -f "$SIMD/mask_despeckle.v" ] && [ -f "$SIMD/tb_mask_despeckle.v" ]; then
     "$IVERILOG_BIN" -g2005 -o dspk.out mask_despeckle.v tb_mask_despeckle.v \
         line_delay_ram.v 2>/dev/null || {
         echo "!! 去斑模块编译失败"; exit 1; }
@@ -99,7 +103,7 @@ fi
 #   验证：填充度判据（方/圆/三角）+ 无效槽 + 阈值边界
 echo
 echo "== 几何分类自检（shape_class）=="
-if [ -f "$SIMDIR/shape_class.v" ] && [ -f "$SIMDIR/tb_shape_class.v" ]; then
+if [ -f "$SIMD/shape_class.v" ] && [ -f "$SIMD/tb_shape_class.v" ]; then
     "$IVERILOG_BIN" -g2005 -o shp.out shape_class.v tb_shape_class.v 2>/dev/null || {
         echo "!! 几何分类模块编译失败"; exit 1; }
     SHP_OUT="$("$VVP_BIN" shp.out 2>&1)"
@@ -117,7 +121,7 @@ fi
 #   验证：颜色/形状计数 + 22 个字符格渲染 + 复用字库数字
 echo
 echo "== 类别 OSD 自检（osd_category）=="
-if [ -f "$SIMDIR/osd_category.v" ] && [ -f "$SIMDIR/tb_osd_category.v" ]; then
+if [ -f "$SIMD/osd_category.v" ] && [ -f "$SIMD/tb_osd_category.v" ]; then
     "$IVERILOG_BIN" -g2005 -o cat.out osd_category.v tb_osd_category.v \
         osd_char_lib.v 2>/dev/null || {
         echo "!! 类别 OSD 模块编译失败"; exit 1; }

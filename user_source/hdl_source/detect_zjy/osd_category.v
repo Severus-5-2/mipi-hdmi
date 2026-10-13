@@ -42,7 +42,7 @@
 //=============================================================================
 
 `timescale 1ns / 1ps
-`include "common_defs.vh"
+`include "../common_base/common_defs.vh"   // ★ 相对本文件目录（同 design_top_wrapper.v 的写法）
 
 module osd_category #(
     //---------------- 布局（必须为 16 的整数倍）----------------
