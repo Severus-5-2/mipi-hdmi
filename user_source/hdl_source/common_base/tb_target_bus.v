@@ -52,7 +52,8 @@ module tb_target_bus;
     conn_label #(
         .IMG_WIDTH  (W),
         .IMG_HEIGHT (H),
-        .MIN_AREA   (1)
+        .MIN_AREA   (1),
+        .LMIN       (1)                 // ★ 测试图样是细线条，设 1 保持完整覆盖（工程用默认 8）
     ) u_conn (
         .clk            (clk),
         .rst_n          (rst_n),

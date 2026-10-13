@@ -53,7 +53,9 @@ module tb_conn_label;
     conn_label #(
         .IMG_WIDTH  (W),
         .IMG_HEIGHT (H),
-        .MIN_AREA   (1)                 // 测试时不滤小目标
+        .MIN_AREA   (1),                // 测试时不滤小目标
+        .LMIN       (1)                 // ★ 测试图样是细线条（游程 1~7），设 1 保持完整覆盖；
+                                        //   工程顶层不传此参数，用默认值 8
     ) dut (
         .clk            (clk),
         .rst_n          (rst_n),

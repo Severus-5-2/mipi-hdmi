@@ -54,8 +54,37 @@ def read_neg_from_rtl():
     return int(m.group(1))
 
 
+def read_lmin_from_rtl():
+    """★ v7.9：读取「单行游程最小长度」LMIN，保证参考模型与**实际被仿真的那一份**同源。
+
+    优先级：
+      1. `tb_conn_label.v` 里显式传的 `.LMIN(n)` —— TB 图样是细线条（游程 1~7），
+         例化时传 1 以保持完整覆盖；**这才是仿真真正生效的值**。
+      2. 否则回退到 `conn_label.v` 的 `parameter integer LMIN = <n>`（工程用默认值 8）。
+
+    短于 LMIN 的游程在 RTL 里被**整体丢弃**（不建 label / 不合并 / 不统计 / 不写 rbuf），
+    参考模型必须同步，否则会大面积对不上。
+    """
+    tb = os.path.join(HERE, "tb_conn_label.v")
+    if os.path.exists(tb):
+        with open(tb, "r", encoding="utf-8") as f:
+            tbtxt = f.read()
+        m = re.search(r"\.LMIN\s*\(\s*(\d+)\s*\)", tbtxt)
+        if m:
+            print("[info] LMIN 取自 tb_conn_label.v 的 .LMIN 覆盖值")
+            return int(m.group(1))
+    src = os.path.join(HERE, "conn_label.v")
+    with open(src, "r", encoding="utf-8") as f:
+        txt = f.read()
+    m = re.search(r"parameter\s+integer\s+LMIN\s*=\s*(\d+)", txt)
+    if not m:
+        raise RuntimeError("未能解析出 LMIN（tb 的 .LMIN(n) 或 conn_label.v 的 parameter）")
+    return int(m.group(1))
+
+
 NEG = read_neg_from_rtl()
-print(f"[info] 从 conn_label.v 读取到 NEG = {NEG}")
+LMIN = read_lmin_from_rtl()
+print(f"[info] 从 conn_label.v 读取到 NEG = {NEG}, LMIN = {LMIN}")
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +246,10 @@ def reference(ps, cs):
         for y in range(H):
             cur = []
             for (x0, x1) in rle_runs(grid[y]):
+                # ★ v7.9：单行游程长度 < LMIN ⇒ 视为噪点，**整体忽略**
+                #   （与 RTL 的 ev_ok 门控一致：不建 label / 不合并 / 不统计 / 不写 rbuf）
+                if (x1 - x0 + 1) < LMIN:
+                    continue
                 ovl = [(ps_, pe, pl) for (ps_, pe, pl) in prev_runs
                        if (x0 <= pe and x1 >= ps_)]
                 resolved = sorted({resolve3(pl) for (_, _, pl) in ovl} - {0})
