@@ -269,6 +269,11 @@ module design_top_wrapper (
     wire [2:0]            S_target_cnt;
     wire                  S_target_update;
 
+    // ★张金艺 D5/D6（方案B §2.3/§2.4）：几何分类 + 类别数量 OSD
+    wire [7:0]  S_shapes;                  // 每槽 2bit 形状（0=方 1=圆 2=三角 3=未知）
+    wire        S_cat_hit;                 // 类别数量 OSD 命中
+    wire [23:0] S_cat_color;
+
     wire [3:0]  S_box_valid;                // 目标总线展开 → box_draw
     wire [7:0]  S_box_cls;                  // ★每槽 2bit 类别 → box_draw 按颜色画框
     wire [43:0] S_box_xmin, S_box_xmax;
@@ -1073,6 +1078,43 @@ isp_top u_isp_top (
         .O_color      ( S_coord_color    )
     );
 
+    //==================================================================
+    //  ★张金艺 D5/D6（方案B §2.3 分类 / §2.4 OSD 文字）
+    //    D5：shape_class 从目标总线算「几何形状」（方/圆/三角，填充度判据）
+    //    D6：osd_category 在屏幕左上角显示「颜色计数 + 形状计数」两行：
+    //          R:1 B:2 G:1     （红/蓝/绿 各几个）
+    //          S:1 C:2 T:1     （方/圆/三角 各几个）
+    //    ⚠ OSD 只读目标总线（整帧锁存），**不参与数据通路**；
+    //      与 box_draw / osd_coord 一样工作在**视频像素域**（S_hdmi_de + S_pix_x/y）。
+    //==================================================================
+    shape_class #(
+        .N_SLOT ( 4 )
+    )u_shape_class(
+        .clk          ( S_hdmi_pixel_clk ),
+        .rst_n        ( S_hdmi_rst_n     ),
+        .I_bus        ( S_target_bus     ),
+        .I_frame_done ( S_frame_done     ),
+        .O_shapes     ( S_shapes         )
+    );
+
+    osd_category #(
+        .X0 ( 16 ),                // 区域左上角（16 的整数倍 ⇒ 零除法）
+        .Y0 ( 16 ),
+        .COLS ( 11 )               // "R:1 B:2 G:1" = 11 个字符格
+    )u_osd_category(
+        .clk          ( S_hdmi_pixel_clk ),
+        .rst_n        ( S_hdmi_rst_n     ),
+        .I_de         ( S_hdmi_de        ),
+        .I_pix_x      ( S_pix_x          ),
+        .I_pix_y      ( S_pix_y          ),
+        .I_bus        ( S_target_bus     ),
+        .I_shapes     ( S_shapes         ),
+        .I_valid_cnt  ( S_target_cnt     ),
+        .I_frame_done ( S_frame_done     ),
+        .O_hit        ( S_cat_hit        ),
+        .O_color      ( S_cat_color      )
+    );
+
     // ===== 叠加仲裁：坐标数字 > 画框 > 检测掩膜 =====
     // ★2026-10-10 合并：S_mask_hit / S_mask_color 已接到 detect_color_mask 输出（见下方例化）。
     // ★连续赋值必须写在模块体内、且在任何模块例化的端口连接列表之外。
@@ -1274,9 +1316,10 @@ isp_top u_isp_top (
     localparam MASK_OVERLAY_EN = 0;
 
     assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
-    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_dspk_mask : 1'b0) | S_box_hit | S_coord_hit;
+    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_dspk_mask : 1'b0) | S_box_hit | S_coord_hit | S_cat_hit;
     assign S_ovl_color  = S_coord_hit ? S_coord_color :
-                          (S_box_hit  ? S_box_color  : S_mask_color);
+                          (S_box_hit  ? S_box_color  :
+                          (S_cat_hit  ? S_cat_color  : S_mask_color));
 
     hdmi_mixer #(
         .H_OFFSET   ( 0    ),
