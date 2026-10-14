@@ -53,11 +53,14 @@
 #-----------------------------------------------------------------------------
 #  四、用法
 #-----------------------------------------------------------------------------
-#  1) 拿一张图（PNG；若是 JPEG 先用画图/看图的"另存为 PNG"转一下）
+#  1) 拿一张图
+#       **PNG 直接用**（内置解码器，零依赖）；
+#       **JPEG 也能直接读** —— 本机装了 Pillow 就行；没装会打印一行转换命令（Windows 自带）。
+#       手机拍的照片、系统截图都可以。
 #  2) 找出目标所在的矩形区域（像素坐标 x0,y0,x1,y1，左上为原点）
 #
 #      python calib_threshold.py photo.png --tgt 400,250,760,520
-#      python calib_threshold.py photo.png --tgt 400,250,760,520 --bg 0,0,1280,120
+#      python calib_threshold.py photo.jpg --tgt 400,250,760,520 --bg 0,0,1280,120
 #      python calib_threshold.py photo.png --tgt 400,250,760,520 --tap scene
 #      python calib_threshold.py photo.png --tgt 400,250,760,520 --mask-out mask.png
 #
@@ -66,7 +69,8 @@
 #  自检（不需要任何素材，会自己造一张 PNG 再读回来）：
 #      python calib_threshold.py --selftest
 #
-#  依赖：**只用 Python 标准库**（zlib/struct/argparse）—— 不需要 PIL / numpy。
+#  依赖：**PNG 只用 Python 标准库**（zlib/struct/argparse）—— 不需要 PIL / numpy；
+#        要读 JPEG 才需要可选的 Pillow（没有就转 PNG，脚本会给出命令）。
 #=============================================================================
 
 import argparse
@@ -117,7 +121,8 @@ def read_png(path):
     with open(path, "rb") as fp:
         data = fp.read()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError("不是 PNG 文件（若为 JPEG，请先另存为 PNG）")
+        raise ValueError("不是 PNG 文件（若为 JPEG，请先另存为 PNG，"
+                         "或用本脚本支持的 Pillow 分支）")
 
     pos = 8
     idat = bytearray()
@@ -196,6 +201,49 @@ def write_png(path, w, h, rgb):
 def get_px(buf, nch, w, x, y):
     i = (y * w + x) * nch
     return buf[i], buf[i + 1], buf[i + 2]
+
+
+#  现场拍的照片多半是 JPEG —— 这一段让它也能直接用（有 Pillow 就用，没有就给出一行转换命令）
+_JPEG_HINT = """\
+★ 输入是 JPEG（现场手机照片常见格式），但本机没装 Pillow，读不了。
+  两个办法（任选其一）：
+
+  A) 先转成 PNG，再用本脚本（Windows 自带，不用装任何东西）：
+     PowerShell 里粘这一行（把路径换成你的）：
+       Add-Type -AssemblyName System.Drawing; `
+       ([System.Drawing.Image]::FromFile("C:\\path\\a.jpg")).Save("C:\\path\\a.png", `
+        [System.Drawing.Imaging.ImageFormat]::Png)
+
+     或者：用系统"画图"打开 → 文件 → 另存为 → PNG 图片。
+
+  B) 装一下 Pillow，之后 JPEG 就能直接读：
+       pip install pillow
+"""
+
+
+def load_image(path):
+    """读图 → (宽, 高, 通道数, 像素字节串)。
+
+    优先用**内置 PNG 解码器**（零依赖）；若输入是 JPEG 等其它格式，
+    则尝试 Pillow（装了就用，没装给出可操作的提示）。
+    """
+    with open(path, "rb") as fp:
+        head = fp.read(8)
+
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return read_png(path)
+
+    if head[:2] == b"\xff\xd8":
+        try:
+            from PIL import Image          # 可选依赖：只为支持 JPEG/其它格式
+        except ImportError:
+            raise ValueError(_JPEG_HINT)
+        im = Image.open(path).convert("RGB")
+        w, h = im.size
+        return w, h, 3, im.tobytes()
+
+    raise ValueError("不认识的图片格式（头 8 字节 = %r）。请用 PNG；"
+                     "JPEG 见下面的提示。\n%s" % (head, _JPEG_HINT))
 
 
 #-----------------------------------------------------------------------------
@@ -500,7 +548,13 @@ def main():
     print("  当前门限    : MAG_TH=%d, RATIO10=%d, G_AXIS_TH=%d   （读自 %s）"
           % (cur_mag, cur_ratio, cur_gax, src))
 
-    w, h, nch, buf = read_png(args.img)
+    try:
+        w, h, nch, buf = load_image(args.img)
+    except ValueError as e:
+        print()
+        print("✗ 读图失败：%s" % e)
+        print("=" * 72)
+        return 2
     print("  图像尺寸    : %dx%d, %d 通道" % (w, h, nch))
 
     tgt_rows = region_chroma(buf, nch, w, h, args.tgt, args.tap, args.gain, args.deadzone, args.step)
