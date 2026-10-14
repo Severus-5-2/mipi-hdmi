@@ -279,6 +279,31 @@ module design_top_wrapper (
     wire [43:0] S_box_xmin, S_box_xmax;
     wire [39:0] S_box_ymin, S_box_ymax;
 
+    //==================================================================
+    //  ★ 2026-10-14 合板：张铭晨 D5/D7/D8 接入（两边功能并到一起，交接版）
+    //    D5 target_assoc  ：目标关联（EMA 平滑 + 漏检保持）→ 把"逐帧跳动的清单"变"稳定的框"
+    //    D7 motion_detect ：帧差法运动检测（降采样 1/4 + 块判决）
+    //    D8 osd_motion_cnt：屏幕显示 "MOTION: N"
+    //    ★ 注意：S_box_* 的**驱动源已从"总线直接展开"改为 target_assoc 的跟踪输出**
+    //      —— 这才是 D5 的意义所在（否则跟踪模块等于没接）。
+    //==================================================================
+    wire        S_frame_end;                // pix_coord_gen 新版：帧末（场消隐）脉冲
+    wire [43:0] S_trk_cx;                   // target_assoc：平滑后的质心（ILA 调试用）
+    wire [39:0] S_trk_cy;
+    wire [2:0]  S_track_cnt;                // 当前在跟的目标数
+
+    wire [3:0]  S_mot_valid;                // motion_detect：运动区域框（4 槽）
+    wire [43:0] S_mot_xmin, S_mot_xmax;
+    wire [39:0] S_mot_ymin, S_mot_ymax;
+    wire [7:0]  S_mot_cls;                  // 运动框统一按红画（cls 全 0）
+    wire [2:0]  S_mot_cnt;                  // 运动区域数（0~4）
+    wire        S_mot_pix, S_mot_pix_v;     // 运动像素（本版未用，留 ILA 调试）
+    wire [7:0]  S_act_blk;                  // 上一帧活动块数
+    wire        S_mot_box_hit;              // 运动框命中（第二个 box_draw 实例）
+    wire [23:0] S_mot_box_color;
+    wire        S_mcnt_hit;                 // "MOTION: N" 计数 OSD 命中
+    wire [23:0] S_mcnt_color;
+
     //===== 自动曝光 AE 测光信号 =====
     wire [7:0]  S_ae_y_avg;        // 帧平均亮度（74.25MHz 域，更新后保持整帧）
     wire        S_ae_frame_tog;    // 帧握手电平，每帧翻转（跨时钟域用）
@@ -1032,6 +1057,12 @@ isp_top u_isp_top (
         .O_pix_x_2d   ( S_pix_x_2d       ),
         .O_pix_y_1d   ( S_pix_y_1d       ),
         .O_pix_y_2d   ( S_pix_y_2d       ),
+        // ★ 2026-10-14：升级到张铭晨新版（带 O_frame_end）。
+        //   新版语义：O_frame_end = 帧末（场消隐，vsync 上升沿）；O_frame_done = 帧首有效像素。
+        //   ⚠ 由 O_frame_done 语义变化带来的"消费者采样时刻"问题已按冻结表 §1.1 铁律处置：
+        //     三个读总线的消费者（osd_coord / shape_class / osd_category）的 I_frame_done
+        //     已统一改接 S_det_fdone（与 S_target_bus 锁存同源 ⇒ 早 0 拍，绝对安全）。
+        .O_frame_end  ( S_frame_end      ),
         .O_frame_done ( S_frame_done     )
     );
 
@@ -1073,7 +1104,11 @@ isp_top u_isp_top (
         .I_pix_y      ( S_pix_y          ),
         .I_x_val      ( 11'd640          ),   // D1 固定显示标定点
         .I_y_val      ( 10'd360          ),
-        .I_frame_done ( S_frame_done     ),
+        // ★ 2026-10-14：改接 S_det_fdone（与 S_target_bus 锁存同源）——
+        //   冻结表 §1.1 铁律：采样首拍须 ≥ 总线锁存拍 或 早 ≥ 一个完整场消隐期。
+        //   新版 pix_coord_gen 的 O_frame_done 在帧首（比锁存早 ≈3 拍），
+        //   若仍接 S_frame_done 会落进"中间地带"造成静默串帧。
+        .I_frame_done ( S_det_fdone      ),
         .O_hit        ( S_coord_hit      ),
         .O_color      ( S_coord_color    )
     );
@@ -1093,7 +1128,10 @@ isp_top u_isp_top (
         .clk          ( S_hdmi_pixel_clk ),
         .rst_n        ( S_hdmi_rst_n     ),
         .I_bus        ( S_target_bus     ),
-        .I_frame_done ( S_frame_done     ),
+        // ★ 2026-10-14：改接 S_det_fdone（与总线锁存同源）——
+        //   本模块是"多拍逐槽取数"（4 拍/槽，取数点在 1/5/9/13 拍），
+        //   是**本链唯一**会被"中间地带"串帧的消费者，必须与总线锁存同源。
+        .I_frame_done ( S_det_fdone      ),
         .O_shapes     ( S_shapes         )
     );
 
@@ -1110,9 +1148,106 @@ isp_top u_isp_top (
         .I_bus        ( S_target_bus     ),
         .I_shapes     ( S_shapes         ),
         .I_valid_cnt  ( S_target_cnt     ),
-        .I_frame_done ( S_frame_done     ),
+        // ★ 2026-10-14：改接 S_det_fdone（保持三处同源，省得再分辨"哪个要改"）。
+        //   注：本模块在单时钟沿内组合读完 4 槽（单拍取数）⇒ 本不受"中间地带"影响，
+        //   只是让它与总线锁存对齐、结果更直观（滞后 0 帧而非 1 帧）。
+        .I_frame_done ( S_det_fdone      ),
         .O_hit        ( S_cat_hit        ),
         .O_color      ( S_cat_color      )
+    );
+
+    //==================================================================
+    //  ★张铭晨 D5/D7/D8（2026-10-14 合板接入：两边功能并到一起）
+    //    D5 target_assoc  → 跟踪稳定化：从 S_target_bus 产生"稳定的框"
+    //        输出**直接驱动 S_box_***（原"总线逐槽展开"那一段已改为接它）
+    //    D7 motion_detect → 帧差法运动检测（降采样 1/4 + 块判决）
+    //    D8 osd_motion_cnt→ 屏幕显示 "MOTION: N"
+    //    ⚠ 三者的 I_frame_done 全部接 S_det_fdone（与总线锁存同源 ⇒ 早 0 拍，
+    //      绝不会落进冻结表 §1.1 说的"中间地带"）
+    //==================================================================
+    target_assoc u_target_assoc (
+        .I_clk         ( S_hdmi_pixel_clk ),
+        .I_rst_n       ( S_hdmi_rst_n     ),
+        .I_frame_done  ( S_det_fdone      ),
+        .I_target_cnt  ( S_target_cnt     ),
+        .I_target_bus  ( S_target_bus     ),
+        .O_box_valid   ( S_box_valid      ),
+        .O_box_xmin    ( S_box_xmin       ),
+        .O_box_xmax    ( S_box_xmax       ),
+        .O_box_ymin    ( S_box_ymin       ),
+        .O_box_ymax    ( S_box_ymax       ),
+        .O_box_cls     ( S_box_cls        ),
+        .O_box_cx      ( S_trk_cx         ),
+        .O_box_cy      ( S_trk_cy         ),
+        .O_track_cnt   ( S_track_cnt      )
+    );
+
+    //---- D7：帧差法运动检测 ----
+    //   ⚠ I_rgb / I_pix_x / I_pix_y / I_de 必须【同拍】⇒ 取 0 延迟的
+    //     S_video_dn + S_pix_x/S_pix_y（与 S_hdmi_de 同拍那一档）。
+    motion_detect u_motion_detect (
+        .I_clk         ( S_hdmi_pixel_clk ),
+        .I_rst_n       ( S_hdmi_rst_n     ),
+        .I_de          ( S_hdmi_de        ),
+        .I_pix_x       ( S_pix_x          ),
+        .I_pix_y       ( S_pix_y          ),
+        .I_rgb         ( S_video_dn       ),
+        .I_frame_done  ( S_det_fdone      ),
+        .O_mot_valid   ( S_mot_valid      ),
+        .O_mot_xmin    ( S_mot_xmin       ),
+        .O_mot_xmax    ( S_mot_xmax       ),
+        .O_mot_ymin    ( S_mot_ymin       ),
+        .O_mot_ymax    ( S_mot_ymax       ),
+        .O_mot_cnt     ( S_mot_cnt        ),
+        .O_mot_pix     ( S_mot_pix        ),
+        .O_mot_pix_v   ( S_mot_pix_v      ),
+        .O_act_blk     ( S_act_blk        )
+    );
+
+    assign S_mot_cls = 8'h00;      // 运动框统一按"红"画（box_draw 的 cls=0）
+
+    //---- 运动框：复用 box_draw 第二个实例（不画十字准星）----
+    box_draw #(
+        .SELF_TEST  ( 0 ),
+        .COLOR_CLS0 ( 24'hff0000 ),
+        .COLOR_CLS1 ( 24'hff0000 ),
+        .COLOR_CLS2 ( 24'hff0000 ),
+        .COLOR_CLS3 ( 24'hff0000 )
+    )u_box_draw_motion(
+        .I_clk       ( S_hdmi_pixel_clk ),
+        .I_rst_n     ( S_hdmi_rst_n     ),
+        .I_de        ( S_hdmi_de        ),
+        .I_pix_x     ( S_pix_x          ),
+        .I_pix_y     ( S_pix_y          ),
+        .I_box_valid ( S_mot_valid      ),
+        .I_box_cls   ( S_mot_cls        ),
+        .I_box_xmin  ( S_mot_xmin       ),
+        .I_box_xmax  ( S_mot_xmax       ),
+        .I_box_ymin  ( S_mot_ymin       ),
+        .I_box_ymax  ( S_mot_ymax       ),
+        .I_cross_en  ( 1'b0             ),
+        .I_cross_x   ( 11'd640          ),
+        .I_cross_y   ( 10'd360          ),
+        .O_hit       ( S_mot_box_hit    ),
+        .O_color     ( S_mot_box_color  ),
+        .O_de        (                  )
+    );
+
+    //---- D8："MOTION: N" 计数 OSD ----
+    //   ⚠ MC_Y0 必须避开我方类别 OSD 占用的 y = 16..48（两行 × 16 像素），故放 y=48。
+    osd_motion_cnt #(
+        .MC_X0 ( 16 ),
+        .MC_Y0 ( 48 )
+    )u_osd_motion_cnt(
+        .I_clk        ( S_hdmi_pixel_clk ),
+        .I_rst_n      ( S_hdmi_rst_n     ),
+        .I_de         ( S_hdmi_de        ),
+        .I_pix_x      ( S_pix_x          ),
+        .I_pix_y      ( S_pix_y          ),
+        .I_mot_cnt    ( S_mot_cnt        ),
+        .I_frame_done ( S_det_fdone      ),
+        .O_hit        ( S_mcnt_hit       ),
+        .O_color      ( S_mcnt_color     )
     );
 
     // ===== 叠加仲裁：坐标数字 > 画框 > 检测掩膜 =====
@@ -1280,26 +1415,15 @@ isp_top u_isp_top (
         .O_update          ( S_target_update  )
     );
 
-    //---- target_bus(4×96) 逐槽展开 → box_draw 的 4 框输入 ----
+    //---- target_bus(4×96) → box_draw 的 4 框输入 ----
+    //   ★ 2026-10-14 合板变更：这里**不再**直接逐槽展开总线，而是改由
+    //     **`u_target_assoc`（张铭晨 D5 目标关联）**输出驱动 S_box_* ——
+    //     它做了 EMA 平滑 + 漏检保持 + 删框，把"逐帧跳动的清单"变成"稳定的框"。
+    //     原逐槽展开（generate + 位域切片）已删除，避免两处同时驱动同一组 wire。
+    //     若需临时回退到"直通"（不跟踪），把上面的 target_assoc 例化换成
+    //     直通赋值即可（`.O_box_*` → 总线位域），或在 target_assoc 内设旁路。
     //   单槽位域（common_defs.vh §3）：valid[0] cls[2:1] cx[13:3] cy[23:14]
-    //   xmin[34:24] xmax[45:35] ymin[55:46] ymax[65:56] area[85:66]
-    //   ① 用 generate 展开，避免手写 4×5 条赋值出错；
-    //   ② 空槽 valid=0（conn_features 已清零字段），box_draw 自然不画。
-    genvar gbox;
-    generate
-        for (gbox = 0; gbox < 4; gbox = gbox + 1) begin : g_box_slot
-            wire [`TGT_SLOT_W-1:0] sl;
-            assign sl = S_target_bus[gbox*`TGT_SLOT_W +: `TGT_SLOT_W];
-            assign S_box_valid[gbox]         = sl[`TGT_O_VALID];
-            assign S_box_xmin[11*gbox +: 11] = sl[`TGT_O_XMIN +: 11];
-            assign S_box_xmax[11*gbox +: 11] = sl[`TGT_O_XMAX +: 11];
-            assign S_box_ymin[10*gbox +: 10] = sl[`TGT_O_YMIN +: 10];
-            assign S_box_ymax[10*gbox +: 10] = sl[`TGT_O_YMAX +: 10];
-            // ★ 2026-10-11：cls 也要传下去 —— 否则 box_draw 只能按槽号猜颜色，
-            //   现场表现为「蓝物体也画红框」（槽号是面积降序，不代表颜色）。
-            assign S_box_cls[2*gbox +: 2]    = sl[`TGT_O_CLS +: 2];
-        end
-    endgenerate
+    //                                  xmin[34:24] xmax[45:35] ymin[55:46] ymax[65:56]
 
     //------------------------------------------------------------------
     //  ★ 2026-10-12：掩膜叠加显示开关
@@ -1316,10 +1440,18 @@ isp_top u_isp_top (
     localparam MASK_OVERLAY_EN = 0;
 
     assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
-    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_dspk_mask : 1'b0) | S_box_hit | S_coord_hit | S_cat_hit;
-    assign S_ovl_color  = S_coord_hit ? S_coord_color :
-                          (S_box_hit  ? S_box_color  :
-                          (S_cat_hit  ? S_cat_color  : S_mask_color));
+    //  ★ 2026-10-14 合板：叠加仲裁加两档（运动框 / MOTION 计数）
+    //    优先级（高→低）：坐标 OSD > 跟踪框 > 类别 OSD > 运动框 > MOTION 计数 > 掩膜
+    //    hdmi_mixer 不需要改 —— 所有人共用 S_ovl_hit / S_ovl_color 这一条通道。
+    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_dspk_mask : 1'b0)
+                        | S_box_hit | S_coord_hit | S_cat_hit
+                        | S_mot_box_hit | S_mcnt_hit;
+    assign S_ovl_color  = S_coord_hit     ? S_coord_color    :
+                          S_box_hit       ? S_box_color      :
+                          S_cat_hit       ? S_cat_color      :
+                          S_mot_box_hit   ? S_mot_box_color  :
+                          S_mcnt_hit      ? S_mcnt_color     :
+                                            S_mask_color;
 
     hdmi_mixer #(
         .H_OFFSET   ( 0    ),
