@@ -228,6 +228,101 @@ module track_glyph_rom (
                 endcase
             end
 
+            //================= 'I' (0x49) =================
+            8'h49: begin
+                case(I_row)
+                    4'd2: O_row_bits = 16'h0ff0;
+                    4'd3: O_row_bits = 16'h0ff0;
+                    4'd4: O_row_bits = 16'h0180;
+                    4'd5: O_row_bits = 16'h0180;
+                    4'd6: O_row_bits = 16'h0180;
+                    4'd7: O_row_bits = 16'h0180;
+                    4'd8: O_row_bits = 16'h0180;
+                    4'd9: O_row_bits = 16'h0180;
+                    4'd10: O_row_bits = 16'h0180;
+                    4'd11: O_row_bits = 16'h0180;
+                    4'd12: O_row_bits = 16'h0ff0;
+                    4'd13: O_row_bits = 16'h0ff0;
+                    default: O_row_bits = 16'h0000;
+                endcase
+            end
+
+            //================= 'M' (0x4d) =================
+            8'h4d: begin
+                case(I_row)
+                    4'd2: O_row_bits = 16'h0c30;
+                    4'd3: O_row_bits = 16'h0c30;
+                    4'd4: O_row_bits = 16'h0a50;
+                    4'd5: O_row_bits = 16'h0a50;
+                    4'd6: O_row_bits = 16'h0990;
+                    4'd7: O_row_bits = 16'h0990;
+                    4'd8: O_row_bits = 16'h0810;
+                    4'd9: O_row_bits = 16'h0810;
+                    4'd10: O_row_bits = 16'h0810;
+                    4'd11: O_row_bits = 16'h0810;
+                    4'd12: O_row_bits = 16'h0810;
+                    4'd13: O_row_bits = 16'h0810;
+                    default: O_row_bits = 16'h0000;
+                endcase
+            end
+
+            //================= 'N' (0x4e) =================
+            8'h4e: begin
+                case(I_row)
+                    4'd2: O_row_bits = 16'h0c30;
+                    4'd3: O_row_bits = 16'h0e30;
+                    4'd4: O_row_bits = 16'h0e30;
+                    4'd5: O_row_bits = 16'h0a30;
+                    4'd6: O_row_bits = 16'h0a30;
+                    4'd7: O_row_bits = 16'h0b30;
+                    4'd8: O_row_bits = 16'h0b30;
+                    4'd9: O_row_bits = 16'h09b0;
+                    4'd10: O_row_bits = 16'h09b0;
+                    4'd11: O_row_bits = 16'h08f0;
+                    4'd12: O_row_bits = 16'h0870;
+                    4'd13: O_row_bits = 16'h0870;
+                    default: O_row_bits = 16'h0000;
+                endcase
+            end
+
+            //================= 'O' (0x4f) =================
+            8'h4f: begin
+                case(I_row)
+                    4'd2: O_row_bits = 16'h07e0;
+                    4'd3: O_row_bits = 16'h0c30;
+                    4'd4: O_row_bits = 16'h0810;
+                    4'd5: O_row_bits = 16'h0810;
+                    4'd6: O_row_bits = 16'h0810;
+                    4'd7: O_row_bits = 16'h0810;
+                    4'd8: O_row_bits = 16'h0810;
+                    4'd9: O_row_bits = 16'h0810;
+                    4'd10: O_row_bits = 16'h0810;
+                    4'd11: O_row_bits = 16'h0810;
+                    4'd12: O_row_bits = 16'h0c30;
+                    4'd13: O_row_bits = 16'h07e0;
+                    default: O_row_bits = 16'h0000;
+                endcase
+            end
+
+            //================= 'T' (0x54) =================
+            8'h54: begin
+                case(I_row)
+                    4'd2: O_row_bits = 16'h0ff0;
+                    4'd3: O_row_bits = 16'h0ff0;
+                    4'd4: O_row_bits = 16'h0180;
+                    4'd5: O_row_bits = 16'h0180;
+                    4'd6: O_row_bits = 16'h0180;
+                    4'd7: O_row_bits = 16'h0180;
+                    4'd8: O_row_bits = 16'h0180;
+                    4'd9: O_row_bits = 16'h0180;
+                    4'd10: O_row_bits = 16'h0180;
+                    4'd11: O_row_bits = 16'h0180;
+                    4'd12: O_row_bits = 16'h0180;
+                    4'd13: O_row_bits = 16'h0180;
+                    default: O_row_bits = 16'h0000;
+                endcase
+            end
+
             //================= 'X' (0x58) =================
             8'h58: begin
                 case(I_row)
