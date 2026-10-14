@@ -62,13 +62,27 @@
 
 在画质链路之外并行的一条**检测链**，输出目标列表供画框显示（详见 `doc/开发方案B-目标检测跟踪与运动检测.md`）：
 
-- **颜色检测（`detect_zjy/detect_color_mask.v`）**：RGB → YCbCr 后对 Cb/Cr 双阈值判决，输出二值掩膜；
-  `I_color_sel` = `0/1/2` 取单色、`3` 取三色相或（多色同帧）。
-- **连通域标注（`common_base/conn_label.v`）**：行内游程（RLE）+ 行间 **4 连通**重叠判定 + 深度 32 等价表并查集（纯寄存器）。
+- **颜色检测（`detect_zjy/detect_color_mask.v`）**：RGB → YCbCr 后按 **v2 曝光自适应判据**
+  （方向 + 幅度 + 绿双轴门限 / 红蓝比值）输出二值掩膜 —— 相比 v1 的「Cb/Cr 固定双阈值」，
+  它**对整体亮度缩放免疫**（低曝光不再漏检）。`I_color_sel` = `0/1/2` 取单色、`3` 取三色相或（多色同帧）。
+  门限走 `common_defs.vh §5b` 的宏、顶层例化引宏（**不要写字面量**，会覆盖模块默认值）。
+- **掩膜去斑（`detect_zjy/mask_despeckle.v`）**：水平窗（左右各 `HALF=4`、窗内命中 ≥ `KMIN=5`）
+  + **跨 3 行 2/3 多数投票** + 保险条款。插在检测与连通域之间 —— 因为 `conn_label` 的 `NEG` 是
+  「同帧最多 N 个连通域、**按扫描顺序先到先得**」，孤立噪点会**抢走名额**让真目标无框；
+  去斑从源头清掉散点（噪声连通域 σ=8 时 12k → **0**，而实心目标 100% 保留）。
+- **连通域标注（`common_base/conn_label.v`）**：行内游程（RLE）+ 行间 **4 连通**重叠判定
+  + 内部展开深度 **`NEG=8`** 的等价表并查集（纯寄存器；`LABEL_MAX` 宏仍为 32）。
+  另含 **`LMIN`**（单行游程最小长度，默认 8）：短游程整体忽略 ⇒ 噪点**不占 `NEG` 名额**。
   输出**每像素 label 流**（6 bit，0 = 无归属）与**帧末汇总**（紧凑编号 / 面积 / 包围盒 / 质心；
   质心在消隐期用 31 步移位-减法除法器算），并给出每个连通域的颜色分类 `cls`（优先级 红 > 蓝 > 绿）。
 - **特征汇总（`common_base/conn_features.v`）**：汇总流按**面积降序取前 4**（插入排序擂台），
   经 `common_base/target_bus.v` 打成 **384 bit 目标列表总线**（4 槽 × 96 bit）。
+- **几何形状分类（`detect_zjy/shape_class.v`，D5）**：从目标总线取 `area / bbox` 算**填充度**
+  判方 / 圆 / 三角（方 f≥88% / 圆 72~88% / 三角 38~72%）。**零除法、零 DSP**
+  （`f≥T%` 化为交叉相乘 + 移位加法；结果每帧只变一次 ⇒ 分时用 1 个乘法器算 4 槽）。
+- **类别数量 OSD（`detect_zjy/osd_category.v`，D6）**：屏幕左上角两行
+  `R:x B:x G:x`（颜色计数）/ `S:x C:x T:x`（形状计数）。自带 `R/B/G/S/C/T` 字母 ROM，
+  数字与冒号**复用 `osd_char_lib.v`**（不动共享字库）。
 - **画框 OSD（`track_box/rtl/box_draw.v`）**：按目标列表在屏上画框，并叠加屏心十字准星。
 
 ## 系统架构
@@ -123,16 +137,22 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 **方案B 目标检测链**（与上面的四模式处理链**并行**，挂在显示域数据上）：
 
 ```
-显示域 RGB ──► YCbCr（Cb/Cr 双阈值）──► 颜色掩膜
-                                            │
-                                            ▼
-                          conn_label（4 连通 RLE-CCL 连通域标注）
-                                            │ 每像素 label 流 + 帧末汇总
-                                            ▼
+显示域 RGB ──► YCbCr + v2 曝光自适应判据 ──► 颜色掩膜
+                                                │
+                                                ▼
+                     mask_despeckle（水平窗 + 跨 3 行 2/3 垂直投票）
+                                                │  只放行"成片"像素，清掉孤立散点
+                                                ▼
+                          conn_label（4 连通 RLE-CCL 连通域标注，NEG=8 + LMIN=8）
+                                                │ 每像素 label 流 + 帧末汇总
+                                                ▼
                           conn_features（面积降序取前 4 → 384bit 目标总线）
-                                            │
-                                            ▼
-                          box_draw（按目标列表画框 + 屏心十字）──► HDMI 叠加
+                                                │
+                        ┌───────────────────────┴───────────────────────┐
+                        ▼                                               ▼
+      box_draw（按目标列表画框 + 屏心十字）        shape_class → osd_category
+                        │                          （几何分类 → 类别/数量 OSD）
+                        └──────────► 叠加仲裁（坐标OSD > 框 > 类别OSD > 掩膜）──► HDMI 叠加
 ```
 
 > ⚠ 检测链里 `conn_label` 的 `I_de / I_mask / I_pix_x / I_pix_y` **必须全部取自 `detect_color_mask` 的 `O_*`**，
@@ -189,7 +209,11 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 │   │   │   ├── conn_label.v                   # 4 连通 RLE-CCL 连通域标注
 │   │   │   └── conn_features.v                # 帧末汇总 → 面积降序前 4 → target_bus
 │   │   ├── detect_zjy/                    # 【方案B】张金艺私有：目标检测
-│   │   │   └── detect_color_mask.v            # YCbCr 双阈值颜色掩膜
+│   │   │   ├── detect_color_mask.v            # v2 曝光自适应判据颜色掩膜
+│   │   │   ├── mask_despeckle.v               # 掩膜去斑（水平窗 + 跨行垂直投票）
+│   │   │   ├── shape_class.v                  # D5 几何形状分类（填充度：方/圆/三角）
+│   │   │   ├── osd_category.v                 # D6 类别 / 数量 OSD
+│   │   │   └── calib_threshold.py             # D7 实物标定工具（离线，不进综合）
 │   │   └── track_box/                     # 【方案B】张铭晨：坐标 / 画框 / OSD
 │   │       └── rtl/                           # pix_coord_gen / box_draw / osd_coord / track_glyph_rom
 │   ├── ip_source/                         # IP 核（PLL / FIFO / ERAM / divider / DDR）
@@ -280,6 +304,14 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 | `WAIT_FRAMES` | `u_ae_set` 实例化 | `4'd3` | 两次调节间隔帧数，**不得小于 2**（sensor N+2 帧生效），否则必振荡 |
 | `METER_MODE` | `u_ae_meter` 实例化 | 1 | 1 = 中央重点加权（默认）；0 = 全帧平均（A/B 对比用） |
 | `SH_CENTER/EDGE/CORNER` | `ae_meter.v` | 3/1/0 | 九宫格权重 2^n，即 8 / 2 / 1；换档需同步改 `K_WEIGHT`（文件头有对照表） |
+| `MAG_TH` | `common_defs.vh §5b` | **24** | 【方案B】检测幅度门限 `\|dcb\|+\|dcr\|`。误检多往上调 28→32，漏检往下调 20→16 |
+| `RATIO10` | `common_defs.vh §5b` | 13 | 【方案B】红/蓝比值门限（`\|a\|*10 ≥ \|b\|*RATIO10`）；橙色/肤色被当红时调大 15 |
+| `G_AXIS_TH` | `common_defs.vh §5b` | **10** | 【方案B】绿判据双轴门限；零星绿点往上调 12→16 |
+| `LMIN` | `conn_label.v` | 8 | 【方案B】单行游程最小长度。「框只套上方」往上调 10→12；小目标没框往下调 6→4 |
+| `HALF` / `KMIN` | `mask_despeckle.v` | 4 / 5 | 【方案B】水平去斑窗；噪声多 → `KMIN` 调大；目标被削 → 调小 |
+
+> 【方案B】门限**一律改 `common_defs.vh §5b` 的宏**（顶层例化引宏，改一处即生效）——
+> 直接改模块 `parameter` 默认值**无效**（会被顶层显式传参覆盖，见 v7.4 记录）。
 
 ## 编译与下载
 
@@ -328,6 +360,7 @@ SC520CS (MIPI CSI-2 2-Lane RAW10)
 | **v8.0** | 方案B **D5/D6 落地：几何形状分类 + 类别数量 OSD**（张金艺，2026-10-13）：<br>① **背景**：方案B 排期里 D5–D6 是「分类 + OSD 文字」，而 D1–D4（取数掩膜 / 连通域 / 特征 / 目标总线）已完成 —— 本次把 D5/D6 补上，检测链路的功能点到此**全部落地**。<br>② **`shape_class.v`（D5 分类）**：从 `target_bus` 取 `area/xmin/xmax/ymin/ymax`，按**填充度 f = area/(w×h)** 判形状 —— 方 `f≥88%`、圆 `72%~88%`、三角 `38%~72%`、其余未知（理论值：方≈100%、圆 π/4≈78.5%、三角 50%）。颜色 × 形状组合才是完整目标类型。<br>③ **★ 零除法、零 DSP**：`f≥T%` 化为 `area×100 ≥ bbox×T`（交叉相乘），两边都用**移位加法**实现（如 `area×100=(area<<6)+(area<<5)+(area<<2)`）—— 本工程 **DSP 已用 37/40（92.5%）**，不能引乘法器。<br>④ **★ 分时省资源**：分类结果每帧只变一次 ⇒ 用 **1 个乘法器**分 4 槽顺序算（每槽 3 拍、共 12 拍），不铺 4 份并行硬件（消隐期约 49500 拍，可忽略）。<br>⑤ **`osd_category.v`（D6 OSD 文字）**：左上角两行 `R:1 B:2 G:1` / `S:1 C:2 T:1`。区域起点取 16 的整数倍 ⇒ **零除法**；沿用 `osd_coord.v` 已验证的「两级流水 + 变址位选」写法。<br>⑥ **★ 不改共享文件**：`osd_char_lib.v` 在中文化改版中已删掉全部英文字母 ⇒ 本模块**自带 R/B/G/S/C/T 六个字母 ROM**，数字与冒号**例化 `osd_char_lib` 复用**（不分叉），按字符码分派。<br>⑦ **验证**：`tb_shape_class.v`（3 轮 12 槽全一致，含阈值边界 88%/87.9%/72%/38%）；`tb_osd_category.v`（构造 4 目标，**把 OSD 区域逐像素扫成点阵打印出来人工可读**，并校验 22 个字符格）；两者已并入 `run_verify.sh`（第 7、8 步）⇒ **一键验证 8 步全 PASS**；全设计 iverilog 编译通过（仅 TD 的 IP 原语缺失，属预期）。<br>⑧ ⚠ **新增源文件需在 TD GUI `Source → Add Source...` 加入工程**：`shape_class.v`、`osd_category.v`。<br>⑨ 冻结表升 **v2.0**。 |
 | **v8.0.1** | 方案B **修 TD 综合报错 + 记录首次全工程综合实测**（张金艺，2026-10-13/14）：<br>① **报错**：`ERROR: cannot open include file 'common_defs.vh' in '.../detect_zjy/osd_category.v'(1)`（`shape_class.v` 同）。<br>② **根因是路径、不是逻辑**：`common_base/*.v` 写 `` `include "common_defs.vh" `` 能过，**只因为它与 `common_defs.vh` 同目录**；`detect_zjy/` 下照抄该写法 ⇒ 去找 `detect_zjy/common_defs.vh`（不存在），而 **TD 不配置 include 搜索路径**。队长 `design_top_wrapper.v` 的 `` `include "common_base/common_defs.vh" ``（相对本文件目录）才是正确写法。<br>③ **处置**：`shape_class.v` / `osd_category.v` / 两个 TB 统一改为 `` `include "../common_base/common_defs.vh" ``；`run_verify.sh` 相应**保留目录层次**（`$SIMDIR/detect_zjy/` + `$SIMDIR/common_base/`），否则扁平拷贝后相对路径会断。<br>④ **★ 首次全工程综合实测（2026-10-13 23:14，含 D5/D6）**：`Run syn_1 success` / `Run phy_1 success`；**slice\* 81.81%（17357 / 21216）**、eram 65/108、**DSP 38/40**；**时序达标 —— SWNS +0.111ns / HWNS +0.020ns**。<br>⑤ 对照：`NEG=16` 那版 slice 曾到 **93.42%** ⇒ 改回 `NEG=8` + `LMIN` 游程过滤后**回落约 12 个百分点**，余量恢复。D5/D6 只占约 2 个点（`shape_class` 343 LUT + **1 DSP**；`osd_category` 38 LUT）。<br>⑥ ⚠ **`DSP 38/40（95%）`已很紧** —— 后续任何新增功能都必须避开乘法器。<br>⑦ TD 的 `Add Source` 曾把两个新文件标为 `AutoExcluded`，已取消（否则不参与综合）。 |
 | **v8.1** | 方案B **D7 落地：实物标定工具 `calib_threshold.py`**（张金艺，2026-10-14）：<br>① **目的** —— 方案B 最后一个功能点「用真实目标物标定 Cb/Cr 阈值」。D1–D6 的门限是按仿真与经验定的，现场换目标物/换光照后最优值会变，D7 就是拿实物量一遍。<br>② **★ 严格同源** —— 脚本把硬件链路原样搬到 Python：YCbCr 系数（77/150/29、-43/-85/128、128/-107/-21、+128 四舍五入、>>>8）、`sat_enhance`（Y 不动、dC×1.5、死区 3、算术右移）、v2 判据（红/蓝用比值、绿用双轴）**逐字对应 RTL**；门限默认值**现场从 `common_defs.vh` 读取**，不硬编码。<br>③ **★ 取数点开关 `--tap`** —— 检测取数点在「饱和度增强之后」：`--tap post`（默认；图已是工程输出，不再增强）／`--tap scene`（手机直拍实物，补上 1.5× 增强）。选错会差很多。<br>④ **输出** —— 目标区/背景区的 (Cb,Cr) 分位与幅度分布；`MAG_TH × G_AXIS_TH` 全扫描的**检出率/误命中率**表；满足「检出 ≥80% 且 误命中 ≤0.1%」的最佳值；**可直接粘贴的 `common_defs.vh` 宏块**；可选 `--mask-out` 写出掩膜预览 PNG 供肉眼核对。<br>⑤ **零依赖** —— 只用 Python 标准库（自带 PNG 解码/编码），**不需要 PIL / numpy**。<br>⑥ **验证** —— `--selftest`（合成 PNG → 解码往返 → 三色块判据 → 灰底零误命中 → `--tap scene` 确实放大色度）**全 PASS**；另用「绿色目标 + 橙色干扰 + σ≈8 噪声」的合成场景实测，**推荐 `MAG_TH 24 / G_AXIS_TH 8`（检出 98.7% / 误命中 0.098%）**，与现行 24/10 高度一致。<br>⑦ ⚠ **不改任何 RTL** —— 纯离线工具；把标定得到的门限改到 `common_defs.vh §5b` 一处即可（顶层引宏）。**不要把这个脚本加进 TD 工程**（它不是综合源文件）。 |
+| **v8.1.1** | 方案B **文档一致性审计（README 部分）**（张金艺，2026-10-14）：把 README 里**关于方案B 检测链的现役描述**与代码对齐（历史版本记录不动）：<br>① §功能特性「4. 目标检测与跟踪」：`detect_color_mask` 的描述由「Cb/Cr 双阈值判决」改为 **v2 曝光自适应判据**（方向+幅度+绿双轴/红蓝比值），并补上「门限走宏、顶层引宏」的提醒；<br>② 同节 `conn_label` 的「深度 32 等价表」改为 **`NEG=8`**（`LABEL_MAX` 宏仍 32），并补 `LMIN` 说明；新增 **掩膜去斑 / 几何分类（D5）/ 类别数量 OSD（D6）** 三条；<br>③ §系统架构 检测链示意图：补 `mask_despeckle` 一级 + `NEG=8/LMIN=8` 标注，并把 `shape_class → osd_category` 分支与叠加仲裁优先级画进去；<br>④ §工程结构 `detect_zjy/` 补齐 `mask_despeckle.v` / `shape_class.v` / `osd_category.v` / `calib_threshold.py`；<br>⑤ §可调参数速查新增 5 行（`MAG_TH` / `RATIO10` / `G_AXIS_TH` / `LMIN` / `HALF,KMIN`），并注明「必须改 `common_defs.vh §5b` 的宏，改模块 parameter 无效」。<br>⚠ 本轮**只改文档，未动任何 RTL**，不影响综合结果。 |
 
 
 
