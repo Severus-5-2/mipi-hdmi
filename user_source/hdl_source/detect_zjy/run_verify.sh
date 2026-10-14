@@ -153,15 +153,18 @@ else
 fi
 
 # ---------- 10. 帧脉冲/总线锁存的「采样窗口」自检（shape_class）----------
-#   消费者读 S_target_bus 的采样首拍若落在「比总线锁存早 2~13 拍」窗口内会静默串帧。
-#   本步把窗口边界钉死，防止日后改 pix_coord_gen / 缩放延迟时踩雷。
+#   消费者读 S_target_bus 的采样首拍若落在「比总线锁存早」的中间地带，会静默串帧。
+#   ★ 判据**不依赖具体实现**（2026-10-14 修订）：
+#       只断言「不早于锁存 -> 当帧」「早一个完整场消隐期 -> 一致上一帧」「中间带存在且连续」；
+#       **窗口上沿只报告、不断言** —— 它随模块取槽节奏变化，钉固定数字会误报。
+#      （起因：张铭晨用四档节奏桩复跑，上沿依次 4/7/10/13 拍 ⇒ "2~13" 只是当前实现的数。）
 echo
 echo "== 采样窗口自检（shape_class 读总线）=="
 if [ -f "$SIMD/tb_shape_class_frame_align.v" ] && [ -f "$SIMD/shape_class.v" ]; then
     "$IVERILOG_BIN" -g2005 -o latch.out shape_class.v tb_shape_class_frame_align.v 2>/dev/null || {
         echo "!! 采样窗口 TB 编译失败"; exit 1; }
     LAT_OUT="$("$VVP_BIN" latch.out 2>&1)"
-    echo "$LAT_OUT" | grep -E '串帧窗口|小结|\[PASS\]|\[FAIL\]' | tail -4
+    echo "$LAT_OUT" | grep -E '串帧带|带外串帧|\[PASS\]|\[FAIL\]|!!' | tail -4
     if echo "$LAT_OUT" | grep -q '\[PASS\]'; then
         : # 通过
     else
