@@ -57,7 +57,7 @@ cp "$HERE/detect_color_mask.v" "$HERE/tb_detect_color_mask.v" "$SIMD/"
 cp "$HERE/mask_despeckle.v" "$HERE/tb_mask_despeckle.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/../line_delay_ram.v" "$SIMD/" 2>/dev/null || true
 # D5/D6：几何分类 + 类别数量 OSD
-cp "$HERE/shape_class.v" "$HERE/tb_shape_class.v" "$SIMD/" 2>/dev/null || true
+cp "$HERE/shape_class.v" "$HERE/tb_shape_class.v" "$HERE/tb_shape_class_frame_align.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/osd_category.v" "$HERE/tb_osd_category.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/../osd_char_lib.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/../common_base/common_defs.vh" "$SIMDIR/common_base/" 2>/dev/null || true
@@ -150,6 +150,25 @@ if [ -f "$HERE/calib_threshold.py" ]; then
     fi
 else
     echo "(跳过：未找到 calib_threshold.py)"
+fi
+
+# ---------- 10. 帧脉冲/总线锁存的「采样窗口」自检（shape_class）----------
+#   消费者读 S_target_bus 的采样首拍若落在「比总线锁存早 2~13 拍」窗口内会静默串帧。
+#   本步把窗口边界钉死，防止日后改 pix_coord_gen / 缩放延迟时踩雷。
+echo
+echo "== 采样窗口自检（shape_class 读总线）=="
+if [ -f "$SIMD/tb_shape_class_frame_align.v" ] && [ -f "$SIMD/shape_class.v" ]; then
+    "$IVERILOG_BIN" -g2005 -o latch.out shape_class.v tb_shape_class_frame_align.v 2>/dev/null || {
+        echo "!! 采样窗口 TB 编译失败"; exit 1; }
+    LAT_OUT="$("$VVP_BIN" latch.out 2>&1)"
+    echo "$LAT_OUT" | grep -E '串帧窗口|小结|\[PASS\]|\[FAIL\]' | tail -4
+    if echo "$LAT_OUT" | grep -q '\[PASS\]'; then
+        : # 通过
+    else
+        echo "!! 采样窗口自检未通过"; exit 1
+    fi
+else
+    echo "(跳过：未找到 tb_shape_class_frame_align.v)"
 fi
 
 echo
