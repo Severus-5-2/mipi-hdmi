@@ -1,0 +1,78 @@
+# A static
+A 0 tcnt=0 trk=0 nv=0 k0=-1 k1=-1 v=0000
+A 1 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 2 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 3 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 4 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 5 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 6 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 7 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 8 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 9 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 10 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+A 11 tcnt=2 trk=2 nv=2 k0=1 k1=0 v=0011
+# B moving
+B 0 tx0=12 nv=0 k=-1 xmin=-1 xmax=-1 v=0000
+B 1 tx0=14 nv=1 k=0 xmin=12 xmax=39 v=0001
+B 2 tx0=16 nv=1 k=0 xmin=12 xmax=39 v=0001
+B 3 tx0=18 nv=1 k=0 xmin=13 xmax=40 v=0001
+B 4 tx0=20 nv=1 k=0 xmin=14 xmax=41 v=0001
+B 5 tx0=22 nv=1 k=0 xmin=15 xmax=42 v=0001
+B 6 tx0=24 nv=1 k=0 xmin=16 xmax=43 v=0001
+B 7 tx0=26 nv=1 k=0 xmin=18 xmax=45 v=0001
+B 8 tx0=28 nv=1 k=0 xmin=20 xmax=47 v=0001
+B 9 tx0=30 nv=1 k=0 xmin=22 xmax=49 v=0001
+B 10 tx0=32 nv=1 k=0 xmin=24 xmax=51 v=0001
+B 11 tx0=34 nv=1 k=0 xmin=26 xmax=53 v=0001
+B 12 tx0=36 nv=1 k=0 xmin=28 xmax=55 v=0001
+B 13 tx0=38 nv=1 k=0 xmin=30 xmax=57 v=0001
+# C miss-hold
+C 1 tcnt=1 nv=1
+C 2 tcnt=0 nv=1
+C 3 tcnt=0 nv=1
+C 4 tcnt=0 nv=1
+C 5 tcnt=0 nv=1
+C 6 tcnt=0 nv=0
+C 7 tcnt=0 nv=0
+C 8 tcnt=0 nv=0
+C 9 tcnt=0 nv=0
+# D empty
+D 0 tcnt=0 nv=0
+D 1 tcnt=0 nv=0
+D 2 tcnt=0 nv=0
+D 3 tcnt=0 nv=0
+D 4 tcnt=0 nv=0
+D 5 tcnt=0 nv=0
+# E longrun
+E 0 tcnt=0 trk=0 nv=0
+E 1 tcnt=1 trk=1 nv=1
+E 2 tcnt=1 trk=1 nv=1
+E 3 tcnt=1 trk=1 nv=1
+E 4 tcnt=1 trk=1 nv=1
+E 5 tcnt=1 trk=1 nv=1
+E 6 tcnt=1 trk=1 nv=1
+E 7 tcnt=1 trk=1 nv=1
+E 8 tcnt=1 trk=1 nv=1
+E 9 tcnt=2 trk=2 nv=2
+E 10 tcnt=2 trk=2 nv=2
+E 11 tcnt=2 trk=2 nv=2
+E 12 tcnt=2 trk=2 nv=2
+E 13 tcnt=2 trk=2 nv=2
+E 14 tcnt=2 trk=2 nv=2
+E 15 tcnt=2 trk=2 nv=2
+E 16 tcnt=2 trk=2 nv=2
+E 17 tcnt=2 trk=2 nv=2
+E 18 tcnt=2 trk=2 nv=2
+E 19 tcnt=2 trk=2 nv=2
+E 20 tcnt=2 trk=2 nv=2
+E 21 tcnt=3 trk=3 nv=3
+E 22 tcnt=3 trk=3 nv=3
+E 23 tcnt=3 trk=3 nv=3
+E 24 tcnt=3 trk=3 nv=3
+E 25 tcnt=3 trk=3 nv=3
+E 26 tcnt=3 trk=3 nv=3
+E 27 tcnt=3 trk=3 nv=3
+E 28 tcnt=3 trk=3 nv=3
+E 29 tcnt=3 trk=3 nv=3
+# F display
+F box0=30,69,20,43 hit=30,69,20,43 n=240
