@@ -136,6 +136,22 @@ else
     echo "(跳过：未找到 osd_category.v / tb_osd_category.v)"
 fi
 
+# ---------- 9. D7 标定工具自检（calib_threshold.py）----------
+#   合成一张 PNG 写盘再读回，校验解码往返 + 三色块判据 + 灰底零误命中 + --tap 语义
+echo
+echo "== D7 标定工具自检（calib_threshold.py）=="
+if [ -f "$HERE/calib_threshold.py" ]; then
+    CAL_OUT="$("$PYTHON_BIN" "$HERE/calib_threshold.py" --selftest 2>&1)"
+    echo "$CAL_OUT" | grep -E '^\s*\[(OK|PASS|FAIL)\]' | tail -8
+    if echo "$CAL_OUT" | grep -q '\[PASS\]'; then
+        : # 通过
+    else
+        echo "!! D7 标定工具自检未通过"; exit 1
+    fi
+else
+    echo "(跳过：未找到 calib_threshold.py)"
+fi
+
 echo
 echo "============================================================"
 echo "  detect_zjy 全量验证：以上各项全部 PASS"
