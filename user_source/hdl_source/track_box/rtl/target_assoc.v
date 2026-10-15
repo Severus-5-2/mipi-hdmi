@@ -299,6 +299,15 @@ module target_assoc #(
     end
 
     // ---- 第 2 拍：对已寄存的 4 个代价做最小选择（组合）----
+    //  ⚠⚠ 2026-10-15 修正（张金艺，待张铭晨复核）：
+    //    本段原先读的是 **组合的 `P_cost`/`P_valid`/`P_free`**，而不是上一拍寄存的
+    //    `Q_cost`/`Q_pv`/`Q_pf` —— 结果是 ST_COST 末尾写进 Q_* 的那一级流水**完全没被消费**
+    //    （`Q_cost` 只写不读，是"死寄存器"），COST 与 SEL 仍然串在同一拍里。
+    //    因为 ST_COST→ST_SEL 之间 `S_i` 与 `R_t*` 都不变，`P_cost` 在第 2 拍重算出来
+    //    与 `Q_cost` **值相同** ⇒ 功能没错，但**时序没被切开**。
+    //    实测后果：布线后最差路径仍是「总线 → 槽选 mux → 代价计算 → 最小选择」一条龙
+    //    （−1.707ns / Logic Level 20 / ADDER=12）。
+    //    现改为读 `Q_*`（真·寄存版）⇒ 这一级流水才真正生效。
     always @(*) begin
         C_best     = 13'h1FFF;
         C_bj       = 2'd0;
@@ -306,16 +315,16 @@ module target_assoc #(
         C_any      = 13'h1FFF;
         C_hit_any  = 1'b0;
         for (mi = 0; mi < 4; mi = mi + 1) begin
-            if (P_valid[mi]) begin
+            if (Q_pv[mi]) begin
                 // ---- 任意有效轨迹的最小代价（新目标门控）----
-                if (!C_hit_any || P_cost[mi*13 +: 13] < C_any) begin
-                    C_any     = P_cost[mi*13 +: 13];
+                if (!C_hit_any || Q_cost[mi*13 +: 13] < C_any) begin
+                    C_any     = Q_cost[mi*13 +: 13];
                     C_hit_any = 1'b1;
                 end
                 // ---- 未被占用轨迹的最小代价（关联；平局取小号）----
-                if (P_free[mi]) begin
-                    if (!C_hit || P_cost[mi*13 +: 13] < C_best) begin
-                        C_best = P_cost[mi*13 +: 13];
+                if (Q_pf[mi]) begin
+                    if (!C_hit || Q_cost[mi*13 +: 13] < C_best) begin
+                        C_best = Q_cost[mi*13 +: 13];
                         C_bj   = mi[1:0];
                         C_hit  = 1'b1;
                     end
