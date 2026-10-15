@@ -60,6 +60,8 @@ cp "$HERE/../line_delay_ram.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/shape_class.v" "$HERE/tb_shape_class.v" "$HERE/tb_shape_class_frame_align.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/osd_category.v" "$HERE/tb_osd_category.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/../osd_char_lib.v" "$SIMD/" 2>/dev/null || true
+# 夜间（低照度）自适应门限自检
+cp "$HERE/tb_night_adapt.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/../common_base/common_defs.vh" "$SIMDIR/common_base/" 2>/dev/null || true
 cd "$SIMD"
 
@@ -136,7 +138,29 @@ else
     echo "(跳过：未找到 osd_category.v / tb_osd_category.v)"
 fi
 
-# ---------- 9. D7 标定工具自检（calib_threshold.py）----------
+# ---------- 9. 夜间（低照度）自适应门限自检（detect_color_mask，NIGHT_EN=1）----------
+#   验证：① 按 AE 帧平均亮度分 4 档下调 MAG_TH（24/20/16/12）
+#         ② 档位边界 ±HYST 滞回（亮度抖动不换档）
+#         ③ 行为：mag 落在 16~24 的目标「亮场不检出、暗场检出」
+#         ④ 反向保护：极暗档下中性灰仍不误检
+#   ⚠ NIGHT_EN 默认 0 ⇒ 工程不显式打开时本特性完全不生效（行为同改造前）。
+echo
+echo "== 夜间自适应门限自检（NIGHT_EN=1）=="
+if [ -f "$SIMD/tb_night_adapt.v" ]; then
+    "$IVERILOG_BIN" -g2005 -o night.out tb_night_adapt.v detect_color_mask.v 2>/dev/null || {
+        echo "!! 夜间自适应 TB 编译失败"; exit 1; }
+    NG_OUT="$("$VVP_BIN" night.out 2>&1)"
+    echo "$NG_OUT" | grep -E '^\s*\[(OK |NG |PASS|FAIL)' | tail -6
+    if echo "$NG_OUT" | grep -q '\[PASS\]'; then
+        : # 通过
+    else
+        echo "!! 夜间自适应门限自检未通过"; exit 1
+    fi
+else
+    echo "(跳过：未找到 tb_night_adapt.v)"
+fi
+
+# ---------- 10. D7 标定工具自检（calib_threshold.py）----------
 #   合成一张 PNG 写盘再读回，校验解码往返 + 三色块判据 + 灰底零误命中 + --tap 语义
 echo
 echo "== D7 标定工具自检（calib_threshold.py）=="
@@ -152,7 +176,7 @@ else
     echo "(跳过：未找到 calib_threshold.py)"
 fi
 
-# ---------- 10. 帧脉冲/总线锁存的「采样窗口」自检（shape_class）----------
+# ---------- 11. 帧脉冲/总线锁存的「采样窗口」自检（shape_class）----------
 #   消费者读 S_target_bus 的采样首拍若落在「比总线锁存早」的中间地带，会静默串帧。
 #   ★ 判据**不依赖具体实现**（2026-10-14 修订）：
 #       只断言「不早于锁存 -> 当帧」「早一个完整场消隐期 -> 一致上一帧」「中间带存在且连续」；

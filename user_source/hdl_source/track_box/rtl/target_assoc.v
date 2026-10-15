@@ -170,7 +170,9 @@ module target_assoc #(
     //==================================================================
     localparam [2:0] ST_IDLE  = 3'd0,
                      ST_ARM   = 3'd4,   // ★ 收到帧脉冲后先等 ARM_DELAY 拍（吸收相位差）
-                     ST_MATCH = 3'd1,   // 逐个处理输入目标 0..3
+                     ST_COST  = 3'd1,   // 阶段1：算 4 条轨迹代价（组合算、本拍末寄存）
+                     ST_SEL   = 3'd5,   // 阶段2：对寄存的代价做最小选择（组合、本拍末寄存）
+                     ST_UPD   = 3'd6,   // 阶段3：按选中的轨迹做速度/EMA 更新
                      ST_FIN   = 3'd2,   // 未匹配轨迹：miss++ / 超时删除
                      ST_OUT   = 3'd3;   // 工作区 → 输出寄存器
 
@@ -201,40 +203,67 @@ module target_assoc #(
     wire [19:0] W_in_area  = W_slot[B_AREA +: 20];
 
     //==================================================================
-    // 5. 最近邻搜索（用「原始位置 + 速度」预测）+ 空槽查找（组合）
-    //    代价 = |cx - pred_x| + |cy - pred_y| + (|Δarea| >> AREA_SHIFT) + cls 惩罚
-    //    C_best/C_bj/C_hit : 在「有效且未被占用」的轨迹里取最小 → 关联目标
-    //    C_any/C_hit_any   : 在「所有有效」轨迹里取最小 → 新目标门控
+    // 5. ★ 最近邻搜索 —— 三级流水（2026-10-15 加，解 Setup −6.9ns）
+    //------------------------------------------------------------------
+    //  背景：合板后 TD 报最差路径 10/10 全在 u_target_assoc 内，
+    //        起点 R_tvy_reg[0]、终点 R_tvx/R_txmax，Logic Level 26
+    //        （ADDER=18），Data Path 20.03ns > 13.333ns 预算。
+    //        那一整条「预测位置 → 代价 → 最小选择 → 速度更新 → R_tvx」
+    //        原本压在同一拍里。
+    //
+    //  改法（方案 A：只插寄存器，算法与结果逐字节不变）：
+    //    第 1 拍 P_COST：对 4 条轨迹并行算「预测位置 + 代价」→ 打拍存 R_cost[4]
+    //    第 2 拍 P_SEL ：对 4 个已寄存的代价做最小选择 → 打拍存 R_bj/R_best/…
+    //    第 3 拍 P_UPD ：用选中的 R_bj 做速度 EMA + 位置 EMA → 写回轨迹
+    //  ⇒ 原 18 级加法链切成 3 段，每段 ≤6 级；一拍多出的 2 个等待拍
+    //    对帧率零影响（一帧 39600 拍，本 FSM 原本只用 ~16 拍）。
+    //
+    //  ★ 为什么"打拍"不改结果：原来的组合块本就是在「同一拍」内按 mi=0..3
+    //    顺序算；拆成三段后，每一段用的输入（W_in_*、R_t* 、S_taken）
+    //    都与原来同一个语义拍一致 —— 只是把「组合延迟」换成了「寄存器延迟」。
+    //    代价：每条轨迹多 1 个代价寄存器 + 3 个零碎标志（约 20 bit × 4）。
+    //
+    //  ⚠ 注意：S_taken 在 ST_MATCH 里是「逐槽累加」的（每处理完一个输入槽就
+    //    写一次），所以代价/选择/更新三级流水必须**按同一个输入槽**串起来，
+    //    不能跨槽流水。因此下面的 FSM 走「一个输入槽 = 3 拍（COST/SEL/UPD）」。
     //==================================================================
-    integer    mi, ai;
+    integer    ai;
     reg [12:0] C_best;
     reg [1:0]  C_bj;
     reg        C_hit;
     reg [12:0] C_any;
     reg        C_hit_any;
-    reg [12:0] C_cost;
-    reg [19:0] C_d;
     reg [1:0]  C_alloc_j;
     reg        C_alloc_ok;
 
-    reg [10:0] C_prx;                  // 该轨迹的预测 x
-    reg [9:0]  C_pry;                  // 该轨迹的预测 y
+    // ---- 第 1 拍：4 条轨迹的代价（组合算、寄存器存）----
+    //   ★ 用「扁平向量 + 变址部分选择」而不是 unpacked 数组：
+    //     文件头已说明 —— iverilog -Wall 对 always @(*) 里的 unpacked 数组
+    //     会报 "@* is sensitive to all N words in array"，与本工程「0 warning」
+    //     的验收口径冲突。这里 4 项全部压成向量。
+    reg [4*13-1:0] P_cost;             // 每条轨迹的代价（13bit × 4）
+    reg [4*1 -1:0] P_valid;            // 该轨迹本拍是否有效（= R_tv）
+    reg [4*1 -1:0] P_free;             // 该轨迹是否未被占用（= !S_taken）
+
+    reg [10:0] C_prx;                  // 该轨迹的预测 x（组合中间量）
+    reg [9:0]  C_pry;                  // 该轨迹的预测 y（组合中间量）
     reg signed [13:0] C_spx, C_spy;    // 预测中间量（有符号）
+    reg [12:0] C_cost;
+    reg [19:0] C_d;
+    integer    mi;
 
     always @(*) begin
-        C_best     = 13'h1FFF;
-        C_bj       = 2'd0;
-        C_hit      = 1'b0;
-        C_any      = 13'h1FFF;
-        C_hit_any  = 1'b0;
-        C_cost     = 13'd0;
-        C_d        = 20'd0;
-        C_prx      = 11'd0;
-        C_pry      = 10'd0;
-        C_spx      = 14'sd0;
-        C_spy      = 14'sd0;
-
+        // 组合：4 条轨迹的预测位置 + 代价（与旧版逐 mi 完全同式）
+        C_prx = 11'd0;
+        C_pry = 10'd0;
+        C_spx = 14'sd0;
+        C_spy = 14'sd0;
+        C_cost = 13'd0;
+        C_d    = 20'd0;
+        P_cost  = {4{13'h1FFF}};
         for (mi = 0; mi < 4; mi = mi + 1) begin
+            P_valid[mi] = R_tv[mi];
+            P_free [mi] = !S_taken[mi];
             if (R_tv[mi]) begin
                 // ---- 预测位置 = 上次原始位置 + 速度（1 帧外推），并夹到画面内 ----
                 C_spx = $signed({3'b000, R_tpx[mi*W_CXW +: W_CXW]}) +
@@ -264,23 +293,39 @@ module target_assoc #(
                 if (W_in_cls != R_tcls[mi*2 +: 2])
                     C_cost = C_cost + CLS_PEN[12:0];
 
+                P_cost[mi*13 +: 13] = C_cost;   // ★ 本拍末寄存，供下一拍做最小选择
+            end
+        end
+    end
+
+    // ---- 第 2 拍：对已寄存的 4 个代价做最小选择（组合）----
+    always @(*) begin
+        C_best     = 13'h1FFF;
+        C_bj       = 2'd0;
+        C_hit      = 1'b0;
+        C_any      = 13'h1FFF;
+        C_hit_any  = 1'b0;
+        for (mi = 0; mi < 4; mi = mi + 1) begin
+            if (P_valid[mi]) begin
                 // ---- 任意有效轨迹的最小代价（新目标门控）----
-                if (!C_hit_any || C_cost < C_any) begin
-                    C_any     = C_cost;
+                if (!C_hit_any || P_cost[mi*13 +: 13] < C_any) begin
+                    C_any     = P_cost[mi*13 +: 13];
                     C_hit_any = 1'b1;
                 end
                 // ---- 未被占用轨迹的最小代价（关联；平局取小号）----
-                if (!S_taken[mi]) begin
-                    if (!C_hit || C_cost < C_best) begin
-                        C_best = C_cost;
+                if (P_free[mi]) begin
+                    if (!C_hit || P_cost[mi*13 +: 13] < C_best) begin
+                        C_best = P_cost[mi*13 +: 13];
                         C_bj   = mi[1:0];
                         C_hit  = 1'b1;
                     end
                 end
             end
         end
+    end
 
-        // ---- 找空闲轨迹（新目标用；优先级 0 > 1 > 2 > 3）----
+    // ---- 空槽查找（新目标用；优先级 0 > 1 > 2 > 3）----
+    always @(*) begin
         C_alloc_j  = 2'd0;
         C_alloc_ok = 1'b0;
         for (ai = 0; ai < 4; ai = ai + 1) begin
@@ -291,34 +336,67 @@ module target_assoc #(
         end
     end
 
-    wire W_match      = W_in_valid && C_hit && (C_best <= MATCH_TH);
-    // 新目标门控：附近没有已有轨迹才允许新建
+    // ★ 选择结果（第 2 拍组合，第 3 拍由 Q_* 寄存版使用）
+    //   W_alloc_gate 在第 2 拍寄存进 Q_callgate，供第 3 拍使用
     wire W_alloc_gate = !C_hit_any || (C_any > MATCH_TH);
 
     //==================================================================
-    // 6a. 速度更新（针对选中的轨迹 C_bj）
+    // 5b. ★ 流水中间寄存器（三级流水的「拍间记忆」）
+    //     —— 第 1 拍（COST）末尾写入、第 2 拍（SEL）读取；
+    //        第 2 拍末尾把选择结果寄存、第 3 拍（UPD）读取。
+    //==================================================================
+    reg [4*13-1:0] Q_cost;             // 第 1 拍 → 第 2 拍：4 条轨迹的代价（13bit×4）
+    reg [4*1 -1:0] Q_pv;               //                     该轨迹有效
+    reg [4*1 -1:0] Q_pf;               //                     该轨迹未被占用
+    reg [95:0]     Q_slot;             // 第 1 拍锁存的输入槽（给第 2/3 拍用）
+
+    reg        Q_cbest_hit;            // 第 2 拍 → 第 3 拍：是否命中
+    reg [1:0]  Q_cbj;                  //                     命中轨迹号
+    reg [12:0] Q_cbest;                //                     最小代价
+    reg        Q_callok;               //                     是否有空槽
+    reg        Q_callgate;             //                     新目标门控（第 2 拍寄存）
+
+    wire [95:0] W_qslot = Q_slot;      // 第 2/3 拍使用的输入槽（已锁存）
+    wire        Q_in_valid = W_qslot[B_VALID];
+    wire [1:0]  Q_in_cls   = W_qslot[B_CLS  +: 2];
+    wire [10:0] Q_in_cx    = W_qslot[B_CX   +: 11];
+    wire [9:0]  Q_in_cy    = W_qslot[B_CY   +: 10];
+    wire [10:0] Q_in_xmin  = W_qslot[B_XMIN +: 11];
+    wire [10:0] Q_in_xmax  = W_qslot[B_XMAX +: 11];
+    wire [9:0]  Q_in_ymin  = W_qslot[B_YMIN +: 10];
+    wire [9:0]  Q_in_ymax  = W_qslot[B_YMAX +: 10];
+    wire [19:0] Q_in_area  = W_qslot[B_AREA +: 20];
+
+    wire W_qmatch = Q_in_valid && Q_cbest_hit && (Q_cbest <= MATCH_TH);
+
+    // ★ 新目标门控（第 2 拍寄存版，供第 3 拍使用；语义与 W_alloc_gate 完全一致）
+    wire W_alloc_gate_q = Q_callgate;
+
+    //==================================================================
+    // 6a. 速度更新（针对第 3 拍选中的轨迹 Q_cbj）
     //     d_raw = cx_in - px（原始位移）；vx <= vx + ((d_raw - vx) >>> VEL_SHIFT)
+    //     ★ 全部用第 2 拍寄存下来的输入值 / 轨迹号，故这一段只依赖寄存器输出
     //==================================================================
-    wire signed [12:0] W_drx = $signed({2'b00, W_in_cx}) - $signed({2'b00, R_tpx[C_bj*W_CXW +: W_CXW]});
-    wire signed [12:0] W_dry = $signed({2'b00, W_in_cy}) - $signed({2'b00, R_tpy[C_bj*W_CYW +: W_CYW]});
-    wire signed [12:0] W_vdx = W_drx - $signed(R_tvx[C_bj*W_VEW +: W_VEW]);
-    wire signed [12:0] W_vdy = W_dry - $signed(R_tvy[C_bj*W_VEW +: W_VEW]);
+    wire signed [12:0] W_drx = $signed({2'b00, Q_in_cx}) - $signed({2'b00, R_tpx[Q_cbj*W_CXW +: W_CXW]});
+    wire signed [12:0] W_dry = $signed({2'b00, Q_in_cy}) - $signed({2'b00, R_tpy[Q_cbj*W_CYW +: W_CYW]});
+    wire signed [12:0] W_vdx = W_drx - $signed(R_tvx[Q_cbj*W_VEW +: W_VEW]);
+    wire signed [12:0] W_vdy = W_dry - $signed(R_tvy[Q_cbj*W_VEW +: W_VEW]);
 
-    wire signed [12:0] C_new_vx = $signed(R_tvx[C_bj*W_VEW +: W_VEW]) + (W_vdx >>> VEL_SHIFT);
-    wire signed [12:0] C_new_vy = $signed(R_tvy[C_bj*W_VEW +: W_VEW]) + (W_vdy >>> VEL_SHIFT);
+    wire signed [12:0] C_new_vx = $signed(R_tvx[Q_cbj*W_VEW +: W_VEW]) + (W_vdx >>> VEL_SHIFT);
+    wire signed [12:0] C_new_vy = $signed(R_tvy[Q_cbj*W_VEW +: W_VEW]) + (W_vdy >>> VEL_SHIFT);
 
     //==================================================================
-    // 6b. 6 个位置字段的「死区 + EMA」新值（针对选中的轨迹 C_bj）
+    // 6b. 6 个位置字段的「死区 + EMA」新值（针对第 3 拍选中的轨迹 Q_cbj）
     //     d = new - old（补码）；|d| >= DEADZONE 才更新：
     //        new = old + (d >>> EMA_SHIFT)          ← 算术右移，保留符号
     //==================================================================
-    wire signed [12:0] W_dcx  = $signed({2'b00, W_in_cx  }) - $signed({2'b00, R_tcx  [C_bj*W_CXW +: W_CXW]});
-    wire signed [12:0] W_dcy  = $signed({2'b00, W_in_cy  }) - $signed({2'b00, R_tcy  [C_bj*W_CYW +: W_CYW]});
-    wire signed [12:0] W_dxmn = $signed({2'b00, W_in_xmin}) - $signed({2'b00, R_txmin[C_bj*W_CXW +: W_CXW]});
-    wire signed [12:0] W_dxmx = $signed({2'b00, W_in_xmax}) - $signed({2'b00, R_txmax[C_bj*W_CXW +: W_CXW]});
-    wire signed [12:0] W_dymn = $signed({2'b00, W_in_ymin}) - $signed({2'b00, R_tymin[C_bj*W_CYW +: W_CYW]});
-    wire signed [12:0] W_dymx = $signed({2'b00, W_in_ymax}) - $signed({2'b00, R_tymax[C_bj*W_CYW +: W_CYW]});
-    wire signed [20:0] W_dar  = $signed({1'b0,  W_in_area}) - $signed({1'b0,  R_tarea[C_bj*W_ARW +: W_ARW]});
+    wire signed [12:0] W_dcx  = $signed({2'b00, Q_in_cx  }) - $signed({2'b00, R_tcx  [Q_cbj*W_CXW +: W_CXW]});
+    wire signed [12:0] W_dcy  = $signed({2'b00, Q_in_cy  }) - $signed({2'b00, R_tcy  [Q_cbj*W_CYW +: W_CYW]});
+    wire signed [12:0] W_dxmn = $signed({2'b00, Q_in_xmin}) - $signed({2'b00, R_txmin[Q_cbj*W_CXW +: W_CXW]});
+    wire signed [12:0] W_dxmx = $signed({2'b00, Q_in_xmax}) - $signed({2'b00, R_txmax[Q_cbj*W_CXW +: W_CXW]});
+    wire signed [12:0] W_dymn = $signed({2'b00, Q_in_ymin}) - $signed({2'b00, R_tymin[Q_cbj*W_CYW +: W_CYW]});
+    wire signed [12:0] W_dymx = $signed({2'b00, Q_in_ymax}) - $signed({2'b00, R_tymax[Q_cbj*W_CYW +: W_CYW]});
+    wire signed [20:0] W_dar  = $signed({1'b0,  Q_in_area}) - $signed({1'b0,  R_tarea[Q_cbj*W_ARW +: W_ARW]});
 
     // 绝对值（补码取反 +1；符号位决定）
     wire [12:0] W_adcx  = W_dcx [12] ? (~W_dcx  + 13'd1) : W_dcx [12:0];
@@ -337,22 +415,22 @@ module target_assoc #(
     // 面积不做死区（面积差极少小于 2，死区对它无意义），直接 EMA
     wire W_up_ar  = 1'b1;
 
-    wire signed [13:0] W_ncx  = $signed({3'b000, R_tcx  [C_bj*W_CXW +: W_CXW]}) + (W_dcx  >>> EMA_SHIFT);
-    wire signed [13:0] W_ncy  = $signed({3'b000, R_tcy  [C_bj*W_CYW +: W_CYW]}) + (W_dcy  >>> EMA_SHIFT);
-    wire signed [13:0] W_nxmn = $signed({3'b000, R_txmin[C_bj*W_CXW +: W_CXW]}) + (W_dxmn >>> EMA_SHIFT);
-    wire signed [13:0] W_nxmx = $signed({3'b000, R_txmax[C_bj*W_CXW +: W_CXW]}) + (W_dxmx >>> EMA_SHIFT);
-    wire signed [13:0] W_nymn = $signed({3'b000, R_tymin[C_bj*W_CYW +: W_CYW]}) + (W_dymn >>> EMA_SHIFT);
-    wire signed [13:0] W_nymx = $signed({3'b000, R_tymax[C_bj*W_CYW +: W_CYW]}) + (W_dymx >>> EMA_SHIFT);
-    wire signed [21:0] W_nar  = $signed({2'b00,  R_tarea[C_bj*W_ARW +: W_ARW]}) + (W_dar  >>> EMA_SHIFT);
+    wire signed [13:0] W_ncx  = $signed({3'b000, R_tcx  [Q_cbj*W_CXW +: W_CXW]}) + (W_dcx  >>> EMA_SHIFT);
+    wire signed [13:0] W_ncy  = $signed({3'b000, R_tcy  [Q_cbj*W_CYW +: W_CYW]}) + (W_dcy  >>> EMA_SHIFT);
+    wire signed [13:0] W_nxmn = $signed({3'b000, R_txmin[Q_cbj*W_CXW +: W_CXW]}) + (W_dxmn >>> EMA_SHIFT);
+    wire signed [13:0] W_nxmx = $signed({3'b000, R_txmax[Q_cbj*W_CXW +: W_CXW]}) + (W_dxmx >>> EMA_SHIFT);
+    wire signed [13:0] W_nymn = $signed({3'b000, R_tymin[Q_cbj*W_CYW +: W_CYW]}) + (W_dymn >>> EMA_SHIFT);
+    wire signed [13:0] W_nymx = $signed({3'b000, R_tymax[Q_cbj*W_CYW +: W_CYW]}) + (W_dymx >>> EMA_SHIFT);
+    wire signed [21:0] W_nar  = $signed({2'b00,  R_tarea[Q_cbj*W_ARW +: W_ARW]}) + (W_dar  >>> EMA_SHIFT);
 
     // 新目标时直接取输入值（无历史可平滑）
-    wire [10:0] C_new_cx  = W_match ? (W_up_cx  ? W_ncx [10:0] : R_tcx  [C_bj*W_CXW +: W_CXW]) : W_in_cx;
-    wire [9:0]  C_new_cy  = W_match ? (W_up_cy  ? W_ncy [9:0]  : R_tcy  [C_bj*W_CYW +: W_CYW]) : W_in_cy;
-    wire [10:0] C_new_xmn = W_match ? (W_up_xmn ? W_nxmn[10:0] : R_txmin[C_bj*W_CXW +: W_CXW]) : W_in_xmin;
-    wire [10:0] C_new_xmx = W_match ? (W_up_xmx ? W_nxmx[10:0] : R_txmax[C_bj*W_CXW +: W_CXW]) : W_in_xmax;
-    wire [9:0]  C_new_ymn = W_match ? (W_up_ymn ? W_nymn[9:0]  : R_tymin[C_bj*W_CYW +: W_CYW]) : W_in_ymin;
-    wire [9:0]  C_new_ymx = W_match ? (W_up_ymx ? W_nymx[9:0]  : R_tymax[C_bj*W_CYW +: W_CYW]) : W_in_ymax;
-    wire [19:0] C_new_ar  = W_match ? (W_up_ar  ? W_nar [19:0] : R_tarea[C_bj*W_ARW +: W_ARW]) : W_in_area;
+    wire [10:0] C_new_cx  = W_qmatch ? (W_up_cx  ? W_ncx [10:0] : R_tcx  [Q_cbj*W_CXW +: W_CXW]) : Q_in_cx;
+    wire [9:0]  C_new_cy  = W_qmatch ? (W_up_cy  ? W_ncy [9:0]  : R_tcy  [Q_cbj*W_CYW +: W_CYW]) : Q_in_cy;
+    wire [10:0] C_new_xmn = W_qmatch ? (W_up_xmn ? W_nxmn[10:0] : R_txmin[Q_cbj*W_CXW +: W_CXW]) : Q_in_xmin;
+    wire [10:0] C_new_xmx = W_qmatch ? (W_up_xmx ? W_nxmx[10:0] : R_txmax[Q_cbj*W_CXW +: W_CXW]) : Q_in_xmax;
+    wire [9:0]  C_new_ymn = W_qmatch ? (W_up_ymn ? W_nymn[9:0]  : R_tymin[Q_cbj*W_CYW +: W_CYW]) : Q_in_ymin;
+    wire [9:0]  C_new_ymx = W_qmatch ? (W_up_ymx ? W_nymx[9:0]  : R_tymax[Q_cbj*W_CYW +: W_CYW]) : Q_in_ymax;
+    wire [19:0] C_new_ar  = W_qmatch ? (W_up_ar  ? W_nar [19:0] : R_tarea[Q_cbj*W_ARW +: W_ARW]) : Q_in_area;
 
     //==================================================================
     // 7. 主状态机（每帧一次）
@@ -376,6 +454,12 @@ module target_assoc #(
             R_tvx    <= {4*13{1'b0}};
             R_tvy    <= {4*13{1'b0}};
             R_tmiss  <= {4*3 {1'b0}};
+            Q_slot   <= 96'd0;
+            Q_cbest_hit <= 1'b0;
+            Q_cbj       <= 2'd0;
+            Q_cbest     <= 13'h1FFF;
+            Q_callok    <= 1'b0;
+            Q_callgate  <= 1'b0;
             O_box_valid <= 4'd0;
             O_box_xmin  <= {(4*11){1'b0}};
             O_box_xmax  <= {(4*11){1'b0}};
@@ -404,57 +488,85 @@ module target_assoc #(
                 if (S_arm == 4'd0) begin
                     S_taken <= 4'd0;
                     S_i     <= 3'd0;
-                    S_st    <= ST_MATCH;
+                    S_st    <= ST_COST;        // ★ 进入三级流水的第 1 拍
                 end else begin
                     S_arm   <= S_arm - 4'd1;
                 end
             end
 
             //----------------------------------------------------------
-            // 每个输入目标一拍：先找轨迹，匹配则 EMA 更新，否则占空槽
-            ST_MATCH: begin
-                if (W_in_valid) begin
-                    if (W_match) begin
+            // ★ 流水 阶段 1（COST）：锁存输入槽 + 算 4 条轨迹的代价
+            //   组合块 P_cost[] 本拍算好，本拍末（时钟沿）寄存进 Q_cost[]
+            //----------------------------------------------------------
+            ST_COST: begin
+                Q_slot <= W_slot;              // 锁存本槽，供 SEL/UPD 两拍使用
+                Q_cost <= P_cost;              // 4 条轨迹代价打拍（整向量）
+                Q_pv   <= P_valid;             // 有效性/占用性同步打拍
+                Q_pf   <= P_free;
+                S_st   <= ST_SEL;
+            end
+
+            //----------------------------------------------------------
+            // ★ 流水 阶段 2（SEL）：对已寄存的代价做最小选择 → 寄存结果
+            //----------------------------------------------------------
+            ST_SEL: begin
+                Q_cbest_hit <= C_hit;
+                Q_cbj       <= C_bj;
+                Q_cbest     <= C_best;
+                Q_callok    <= C_alloc_ok;
+                Q_callgate  <= W_alloc_gate;   // ★ 第 2 拍寄存门控，第 3 拍用
+                S_st        <= ST_UPD;
+            end
+
+            //----------------------------------------------------------
+            // ★ 流水 阶段 3（UPD）：按选中轨迹做速度/EMA 更新（或占空槽）
+            //   全部输入来自寄存器（Q_*），故这一段与阶段 1/2 无组合耦合
+            //----------------------------------------------------------
+            ST_UPD: begin
+                if (Q_in_valid) begin
+                    if (W_qmatch) begin
                         // ---- 关联上已有轨迹：速度更新 + EMA + 死区 ----
-                        S_taken [C_bj]                        <= 1'b1;
-                        R_tmiss [C_bj*W_MSW +: W_MSW]         <= 3'd0;
-                        R_tcls  [C_bj*2 +: 2]                 <= W_in_cls;  // 类别立即跟随
-                        R_tpx   [C_bj*W_CXW +: W_CXW]         <= W_in_cx;   // 原始位置
-                        R_tpy   [C_bj*W_CYW +: W_CYW]         <= W_in_cy;
-                        R_tvx   [C_bj*W_VEW +: W_VEW]         <= C_new_vx;  // 速度 EMA
-                        R_tvy   [C_bj*W_VEW +: W_VEW]         <= C_new_vy;
-                        R_tcx   [C_bj*W_CXW +: W_CXW]         <= C_new_cx;  // 平滑框
-                        R_tcy   [C_bj*W_CYW +: W_CYW]         <= C_new_cy;
-                        R_txmin [C_bj*W_CXW +: W_CXW]         <= C_new_xmn;
-                        R_txmax [C_bj*W_CXW +: W_CXW]         <= C_new_xmx;
-                        R_tymin [C_bj*W_CYW +: W_CYW]         <= C_new_ymn;
-                        R_tymax [C_bj*W_CYW +: W_CYW]         <= C_new_ymx;
-                        R_tarea [C_bj*W_ARW +: W_ARW]         <= C_new_ar;
+                        S_taken [Q_cbj]                       <= 1'b1;
+                        R_tmiss [Q_cbj*W_MSW +: W_MSW]        <= 3'd0;
+                        R_tcls  [Q_cbj*2 +: 2]                <= Q_in_cls;  // 类别立即跟随
+                        R_tpx   [Q_cbj*W_CXW +: W_CXW]        <= Q_in_cx;   // 原始位置
+                        R_tpy   [Q_cbj*W_CYW +: W_CYW]        <= Q_in_cy;
+                        R_tvx   [Q_cbj*W_VEW +: W_VEW]        <= C_new_vx;  // 速度 EMA
+                        R_tvy   [Q_cbj*W_VEW +: W_VEW]        <= C_new_vy;
+                        R_tcx   [Q_cbj*W_CXW +: W_CXW]        <= C_new_cx;  // 平滑框
+                        R_tcy   [Q_cbj*W_CYW +: W_CYW]        <= C_new_cy;
+                        R_txmin [Q_cbj*W_CXW +: W_CXW]        <= C_new_xmn;
+                        R_txmax [Q_cbj*W_CXW +: W_CXW]        <= C_new_xmx;
+                        R_tymin [Q_cbj*W_CYW +: W_CYW]        <= C_new_ymn;
+                        R_tymax [Q_cbj*W_CYW +: W_CYW]        <= C_new_ymx;
+                        R_tarea [Q_cbj*W_ARW +: W_ARW]        <= C_new_ar;
                     end
-                    else if (C_alloc_ok && W_alloc_gate) begin
+                    else if (Q_callok && W_alloc_gate_q) begin
                         // ---- 新目标：直接落一条空闲轨迹（不平滑，速度清零）----
                         S_taken [C_alloc_j]                   <= 1'b1;
                         R_tv    [C_alloc_j]                   <= 1'b1;
                         R_tmiss [C_alloc_j*W_MSW +: W_MSW]    <= 3'd0;
-                        R_tcls  [C_alloc_j*2 +: 2]            <= W_in_cls;
-                        R_tpx   [C_alloc_j*W_CXW +: W_CXW]    <= W_in_cx;
-                        R_tpy   [C_alloc_j*W_CYW +: W_CYW]    <= W_in_cy;
+                        R_tcls  [C_alloc_j*2 +: 2]            <= Q_in_cls;
+                        R_tpx   [C_alloc_j*W_CXW +: W_CXW]    <= Q_in_cx;
+                        R_tpy   [C_alloc_j*W_CYW +: W_CYW]    <= Q_in_cy;
                         R_tvx   [C_alloc_j*W_VEW +: W_VEW]    <= 13'sd0;
                         R_tvy   [C_alloc_j*W_VEW +: W_VEW]    <= 13'sd0;
-                        R_tcx   [C_alloc_j*W_CXW +: W_CXW]    <= W_in_cx;
-                        R_tcy   [C_alloc_j*W_CYW +: W_CYW]    <= W_in_cy;
-                        R_txmin [C_alloc_j*W_CXW +: W_CXW]    <= W_in_xmin;
-                        R_txmax [C_alloc_j*W_CXW +: W_CXW]    <= W_in_xmax;
-                        R_tymin [C_alloc_j*W_CYW +: W_CYW]    <= W_in_ymin;
-                        R_tymax [C_alloc_j*W_CYW +: W_CYW]    <= W_in_ymax;
-                        R_tarea [C_alloc_j*W_ARW +: W_ARW]    <= W_in_area;
+                        R_tcx   [C_alloc_j*W_CXW +: W_CXW]    <= Q_in_cx;
+                        R_tcy   [C_alloc_j*W_CYW +: W_CYW]    <= Q_in_cy;
+                        R_txmin [C_alloc_j*W_CXW +: W_CXW]    <= Q_in_xmin;
+                        R_txmax [C_alloc_j*W_CXW +: W_CXW]    <= Q_in_xmax;
+                        R_tymin [C_alloc_j*W_CYW +: W_CYW]    <= Q_in_ymin;
+                        R_tymax [C_alloc_j*W_CYW +: W_CYW]    <= Q_in_ymax;
+                        R_tarea [C_alloc_j*W_ARW +: W_ARW]    <= Q_in_area;
                     end
                     // 既匹配不上、又不满足新建门控 / 无空槽 → 丢弃（框已满或防重复）
                 end
                 if (S_i == 3'd3)
                     S_st <= ST_FIN;
-                else
+                else begin
                     S_i  <= S_i + 3'd1;
+                    S_st <= ST_COST;           // 下一个输入槽，回到流水首拍
+                end
             end
 
             //----------------------------------------------------------

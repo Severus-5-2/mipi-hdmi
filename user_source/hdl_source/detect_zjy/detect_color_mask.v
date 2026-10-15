@@ -158,6 +158,41 @@ module detect_color_mask #(
     parameter [7:0] MAG_TH = 8'd24,
 
     //------------------------------------------------------------------
+    //  ★ 2026-10-15 新增：夜间（低照度）自适应门限
+    //------------------------------------------------------------------
+    //  现场诉求：「让设备在夜间环境下也能稳定跑通已有功能」。
+    //
+    //  机理（为什么用「帧平均亮度」做判据）：
+    //    AE 闭环（`uiisp_beta/ae_set.v`，`TARGET_DEF = 145`）会一直调曝光/增益
+    //    把**画面平均亮度**拉到靶值。**只有在环境暗到把增益用满仍达不到靶值时，
+    //    Y_avg 才会掉下来** —— 所以 `Y_avg` 偏低本身就是"夜间 / 极暗"的可靠标志。
+    //    此时目标三通道同比例变小 ⇒ 色差 (Cb-128, Cr-128) 同比例缩小
+    //    ⇒ 固定 `MAG_TH=24` 会让暗场目标「够不着门限」而丢检。
+    //    ⇒ 按 Y_avg 分 4 档，暗场逐档下调 MAG_TH。
+    //
+    //  ⚠ 为什么降门限不会招回噪声：
+    //    暗场是高增益场景，色度噪声确实更大；但本工程有**两道**下游兜底 ——
+    //      ① `mask_despeckle.v`：水平 9 像素窗命中 <KMIN 的孤立点直接清掉；
+    //      ② `conn_label.v` 的 `LMIN=8`：单行游程 <8 的短条不建 label、不占 NEG 名额。
+    //    两者都是"按空间结构判噪"，与亮度无关，所以门限可以安全下调。
+    //
+    //  ★★ 默认 `NIGHT_EN = 0` ⇒ 门限恒等于 `MAG_TH`，
+    //     **与改造前逐位一致**（所有既有回归 / 位级对拍不受影响）。
+    //     工程顶层显式 `.NIGHT_EN(1)` 才启用；改档位只需改这里的 4 组参数。
+    //------------------------------------------------------------------
+    parameter integer NIGHT_EN = 0,       // 0 = 关闭（默认，行为同改造前）；1 = 启用
+    parameter [7:0] TH_NORM = 8'd112,     // Y_avg ≥ 112      → 档 0（正常亮，AE 跟得上）
+    parameter [7:0] TH_DIM  = 8'd80,      // 80 ≤ Y_avg < 112 → 档 1（略暗）
+    parameter [7:0] TH_DARK = 8'd48,      // 48 ≤ Y_avg < 80  → 档 2（暗）
+                                          // Y_avg < 48       → 档 3（很暗）
+    parameter integer HYST  = 6,          // 档位滞回（±6 LSB，防边界抖动）
+    parameter [7:0] MAG_B0 = 8'd24,       // 档 0 门限（★ 必须与 common_defs.vh §5b 的
+                                          //        `MAG_TH` 同值；顶层例化时引宏传入）
+    parameter [7:0] MAG_B1 = 8'd20,       // 档 1
+    parameter [7:0] MAG_B2 = 8'd16,       // 档 2
+    parameter [7:0] MAG_B3 = 8'd12,       // 档 3
+
+    //------------------------------------------------------------------
     //  ★ 2026-10-12 新增：绿判据「双轴门限」
     //    绿要求 |dcb| ≥ G_AXIS_TH **且** |dcr| ≥ G_AXIS_TH（在象限判据之上）。
     //    · 纯绿 (0,255,0) 的 dcb:dcr ≈ -85:-107（比值 1.26），两轴同向同量级
@@ -221,6 +256,13 @@ module detect_color_mask #(
     // ---- 目标颜色选择（拨码 / 按键，静态信号）----
     //      2'd0 = 红   2'd1 = 蓝   2'd2 = 绿   2'd3 = 三色取或
     input  wire [1:0]  I_color_sel,
+
+    // ---- ★ 夜间自适应输入（仅 NIGHT_EN=1 时被使用；=0 时本模块对它完全免疫）----
+    //      I_y_avg / I_frame_toggle 直接接工程里 ae_meter 的同名输出：
+    //        u_ae_meter .O_Y_avg → I_y_avg          （8bit 帧平均亮度，更新后保持整帧）
+    //        u_ae_meter .O_frame_toggle → I_frame_toggle（每帧翻转一次，用作采样脉冲）
+    input  wire [7:0]  I_y_avg,      // 帧平均亮度（来自 ae_meter）
+    input  wire        I_frame_toggle, // 帧握手电平（每帧翻转）
 
     // ---- 输出：二值掩膜（与 O_de / O_pix_x / O_pix_y 严格同拍）----
     output reg         O_mask,       // 选中颜色的掩膜（1 = 命中）
@@ -426,7 +468,11 @@ module detect_color_mask #(
 
     //  饱和度幅度 |dcb|+|dcr| ∈ [0,256] → 9 bit
     wire [8:0] w_mag = {1'b0, w_adcb} + {1'b0, w_adcr};
-    wire       w_mag_ok = (w_mag >= {1'b0, MAG_TH});
+    //  ★ 2026-10-15：门限来源二选一 ——
+    //    NIGHT_EN=0 → 恒为 parameter MAG_TH（行为与改造前逐位一致）
+    //    NIGHT_EN=1 → 用按 AE 帧平均亮度分档算出的 r_mag_th（见本文件末尾的状态机）
+    wire [7:0] w_mag_th = NIGHT_EN ? r_mag_th : MAG_TH;
+    wire       w_mag_ok = (w_mag >= {1'b0, w_mag_th});
 
     //  比值判据：|a|*10 >= |b|*RATIO10  （|a| ≤ 128 ⇒ |a|*10 ≤ 1280，11 bit 够）
     //
@@ -561,6 +607,74 @@ module detect_color_mask #(
 
             // 帧末脉冲：对齐后的 I_user（此刻上一帧像素已全部流出流水线）
             O_frame_done <= d3_user[1];
+        end
+    end
+
+    //==================================================================
+    //  ★ 2026-10-15  夜间（低照度）自适应档位状态机
+    //------------------------------------------------------------------
+    //  输入：I_y_avg（ae_meter 的帧平均亮度）、I_frame_toggle（每帧翻转一次）
+    //  输出：r_mag_th —— 仅在 NIGHT_EN=1 时被 w_mag_ok 采用
+    //
+    //  分档（默认参数）：
+    //      Y_avg ≥ 112        → 档 0，MAG_TH = 24   （正常亮，与改造前完全一致）
+    //   80 ≤ Y_avg < 112     → 档 1，MAG_TH = 20
+    //   48 ≤ Y_avg < 80      → 档 2，MAG_TH = 16
+    //        Y_avg < 48      → 档 3，MAG_TH = 12   （极暗）
+    //
+    //  滞回（±HYST）：变亮要越过「本档上边界 + HYST」才升档；
+    //                变暗要低于「下一档上边界 − HYST」才降档。
+    //                ⇒ 亮度在边界附近抖动时门限不会每帧跳。
+    //
+    //  采样时刻：ae_meter 在每帧末尾同时更新 O_Y_avg 与翻转 O_frame_toggle。
+    //            这里检测 toggle 的跳变沿（单拍脉冲）后**再延 1 拍**才采样，
+    //            保证读到的必定是更新后、且整帧保持不变的稳定值。
+    //
+    //  成本：约 8 个比较器 + 4 个寄存器（无乘法器、无 RAM）。
+    //  ⚠ NIGHT_EN=0 时整块被常量折叠掉，综合不会留下任何逻辑。
+    //==================================================================
+    reg        s_tog_d;      // 上一拍 toggle，用于检出跳变沿
+    reg        s_edge;       // 跳变沿（单拍）
+    reg        s_edge_d;     // 再延 1 拍 → 此刻 I_y_avg 已稳定
+    reg [1:0]  r_band;       // 当前档位 0~3
+    reg [7:0]  r_mag_th;     // 当前档位对应的幅度门限
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            s_tog_d  <= 1'b0;
+            s_edge   <= 1'b0;
+            s_edge_d <= 1'b0;
+        end else begin
+            s_tog_d  <= I_frame_toggle;
+            s_edge   <= s_tog_d ^ I_frame_toggle;   // 每帧一个单拍脉冲
+            s_edge_d <= s_edge;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            r_band   <= 2'd0;
+            r_mag_th <= MAG_B0;
+        end else if (s_edge_d) begin
+            case (r_band)
+                // 档 0：只有变暗到 (TH_NORM − HYST) 以下才降到档 1
+                2'd0: if (I_y_avg < (TH_NORM - HYST))
+                          begin r_band <= 2'd1; r_mag_th <= MAG_B1; end
+                // 档 1：变亮越 (TH_NORM + HYST) 才回档 0；变暗越 (TH_DIM − HYST) 降档 2
+                2'd1: if (I_y_avg >= (TH_NORM + HYST))
+                          begin r_band <= 2'd0; r_mag_th <= MAG_B0; end
+                      else if (I_y_avg < (TH_DIM - HYST))
+                          begin r_band <= 2'd2; r_mag_th <= MAG_B2; end
+                // 档 2：双向都带滞回
+                2'd2: if (I_y_avg >= (TH_DIM + HYST))
+                          begin r_band <= 2'd1; r_mag_th <= MAG_B1; end
+                      else if (I_y_avg < (TH_DARK - HYST))
+                          begin r_band <= 2'd3; r_mag_th <= MAG_B3; end
+                // 档 3：最暗档，只能变亮回档 2
+                2'd3: if (I_y_avg >= (TH_DARK + HYST))
+                          begin r_band <= 2'd2; r_mag_th <= MAG_B2; end
+                default: begin r_band <= 2'd0; r_mag_th <= MAG_B0; end
+            endcase
         end
     end
 
