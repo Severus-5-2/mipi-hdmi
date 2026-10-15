@@ -142,6 +142,8 @@ module tb_ycbcr_equiv;
         .I_rgb(v_rgb),
         .I_pix_x(cc_px), .I_pix_y(cc_py),
         .I_color_sel(`COLOR_SEL_OR),
+        // ★ 2026-10-15 夜间自适应（本 TB 用 NIGHT_EN 默认 0）：显式绑定，避免悬空告警
+        .I_y_avg(8'd145), .I_frame_toggle(1'b0),
         .O_mask(), .O_mask_r(), .O_mask_g(), .O_mask_b(),
         .O_y(b_y), .O_cb(b_cb), .O_cr(b_cr),
         .O_de(b_de), .O_vsync(), .O_hsync(), .O_user(), .O_last(),

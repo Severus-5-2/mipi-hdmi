@@ -63,6 +63,10 @@ module tb_detect_color_mask;
         .I_pix_x     (I_pix_x),
         .I_pix_y     (I_pix_y),
         .I_color_sel (I_color_sel),
+        // ★ 2026-10-15 夜间自适应（NIGHT_EN 用本 TB 的默认 0）：显式绑成"正常亮"，
+        //   避免"输入悬空"告警；NIGHT_EN=0 时这两路不影响任何输出。
+        .I_y_avg        (8'd145),
+        .I_frame_toggle (1'b0),
         .O_mask      (O_mask),
         .O_mask_r    (O_mask_r),
         .O_mask_g    (O_mask_g),
