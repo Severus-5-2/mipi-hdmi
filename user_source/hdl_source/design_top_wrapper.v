@@ -1283,6 +1283,12 @@ isp_top u_isp_top (
         //      conn_label 每行游程爆表 → 超出 NEG=8 → 真目标被挤掉 → 无框）。
         //   现改为引 common_defs.vh 的宏，与模块默认值**同源**，不会再分叉。
         //   改门限只需改 common_defs.vh 一处（§5b）。
+        // ★ 2026-10-15 夜间（低照度）自适应门限 —— 让暗场目标不再"够不着门限"：
+        //   按 ae_meter 的**帧平均亮度**分 4 档下调 MAG_TH（24/20/16/12，带 ±6 滞回）。
+        //   亮度 ≥112（AE 跟得上）时输出仍 = `MAG_TH`，行为与改造前一致。
+        //   ⚠ 设 NIGHT_EN(0) 可一键退回"固定门限"行为（无需改 detect_color_mask.v）。
+        .NIGHT_EN   ( 1     ),          // 1 = 启用夜间自适应；0 = 固定门限（同改造前）
+        .MAG_B0     ( `MAG_TH ),        // 档 0 门限必须与 §5b 的 `MAG_TH` 同源
         .USE_ABS_WINDOW ( 0   )
     )u_detect_color_mask(
         .clk        ( S_hdmi_pixel_clk ),
@@ -1296,6 +1302,10 @@ isp_top u_isp_top (
         .I_pix_x    ( S_pix_x_2d       ),
         .I_pix_y    ( S_pix_y_2d       ),
         .I_color_sel( `COLOR_SEL_OR    ),   // ★D4：2'd3 = 三色取或（多色同帧）
+        // ★ 2026-10-15 夜间自适应输入：直接取 ae_meter 的两路"旁路取样"信号，
+        //   不动 AE 闭环、不动任何像素数据 ⇒ 对显示与曝光零影响。
+        .I_y_avg        ( S_ae_y_avg   ),   // 帧平均亮度（更新后保持整帧）
+        .I_frame_toggle ( S_ae_frame_tog ), // 每帧翻转一次（作为采样脉冲）
         .O_mask     ( S_mask_hit       ),
         .O_mask_r   ( S_det_mask_r     ),
         .O_mask_g   ( S_det_mask_g     ),
