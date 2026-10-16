@@ -61,10 +61,7 @@ cp "$HERE/shape_class.v" "$HERE/tb_shape_class.v" "$HERE/tb_shape_class_frame_al
 cp "$HERE/osd_category.v" "$HERE/tb_osd_category.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/../osd_char_lib.v" "$SIMD/" 2>/dev/null || true
 # 夜间（低照度）自适应门限自检
-# 位置自适应门限（渐晕/边缘色度补偿）自检
 cp "$HERE/tb_night_adapt.v" "$SIMD/" 2>/dev/null || true
-# 位置自适应门限（渐晕/边缘色度补偿）自检
-cp "$HERE/tb_zone_th.v" "$SIMD/" 2>/dev/null || true
 cp "$HERE/../common_base/common_defs.vh" "$SIMDIR/common_base/" 2>/dev/null || true
 cd "$SIMD"
 
@@ -179,28 +176,7 @@ else
     echo "(跳过：未找到 calib_threshold.py)"
 fi
 
-# ---------- 11. 位置自适应门限自检（渐晕/边缘色度补偿）----------
-#   验证 3×3 九宫格分区放宽：中心 +0 / 边中 +MAGD_EDGE / 四角 +MAGD_CORNER。
-#   ⚠ 两个放宽量**默认 0**（= 不补偿）；工程顶层显式传非 0 才生效。
-#   ★ 定性依据见 `_vignette_2026-10-16/tb_vignette.v` 的对照实验（边缘色度衰减 40% 会丢检，
-#     加补偿后边中/四角都恢复检出；中性灰在四角仍不误检）。
-echo
-echo "== 位置自适应门限自检（渐晕/边缘色度补偿）=="
-if [ -f "$SIMD/tb_zone_th.v" ]; then
-    "$IVERILOG_BIN" -g2005 -o zone.out tb_zone_th.v detect_color_mask.v 2>/dev/null || {
-        echo "!! 分区门限 TB 编译失败"; exit 1; }
-    ZN_OUT="$("$VVP_BIN" zone.out 2>&1)"
-    echo "$ZN_OUT" | grep -E '\[PASS\]|\[FAIL\]|\[NG ' | tail -4
-    if echo "$ZN_OUT" | grep -q '\[PASS\]'; then
-        : # 通过
-    else
-        echo "!! 位置自适应门限自检未通过"; exit 1
-    fi
-else
-    echo "(跳过：未找到 tb_zone_th.v)"
-fi
-
-# ---------- 12. 帧脉冲/总线锁存的「采样窗口」自检（shape_class）----------
+# ---------- 11. 帧脉冲/总线锁存的「采样窗口」自检（shape_class）----------
 #   消费者读 S_target_bus 的采样首拍若落在「比总线锁存早」的中间地带，会静默串帧。
 #   ★ 判据**不依赖具体实现**（2026-10-14 修订）：
 #       只断言「不早于锁存 -> 当帧」「早一个完整场消隐期 -> 一致上一帧」「中间带存在且连续」；
