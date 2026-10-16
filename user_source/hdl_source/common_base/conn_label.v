@@ -148,7 +148,9 @@ module conn_label #(
     //    导致下一帧开局用错 bank-0 → 全帧静默错位。
     //    加 !ev_valid 后改为「ev_valid 落下的下一拍」进 FSM，此时 ev_valid_r 已消费完毕。
     //    代价：FSM 起点晚 1 拍（消隐期 49500 拍，可忽略）。
-    wire frame_end = I_de_d && !I_de && (I_pix_y == YLAST) && !ev_valid;
+    //    ★ 2026-10-16 代码清理：`frame_end` 的赋值**已下移到 `I_de_d` / `ev_valid` 声明之后**
+    //      （原来在 151 行，TD 报 HDL-5007 "used before its declaration"）。
+    //      行为不变：assign 与 always 块的位置不影响语义；联合 TB 复跑逐字节一致。
 
     //=========================================================================
     //  1. 等价表（并查表，纯寄存器） + 3 级展开解析
@@ -201,6 +203,10 @@ module conn_label #(
     reg [1:0]     ev_cls;                         // 关闭游程的颜色（随事件携带）
 
     reg           I_de_d;
+
+    //  ★ 2026-10-16 代码清理：从 151 行下移至此（原来用到了尚未声明的 `I_de_d` / `ev_valid`，
+    //    TD 报 HDL-5007 "used before its declaration"）。语义完全等价。
+    wire frame_end = I_de_d && !I_de && (I_pix_y == YLAST) && !ev_valid;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -293,11 +299,9 @@ module conn_label #(
     //  故寄存式 = 「下一拍的 wr_bank」代入原式 = (~wr_bank) ? 0 : NEG
     //                                            = wr_bank ? NEG : 0
     //  ⚠ 不能写成 `wr_bank ? 0 : NEG` —— 那会晚一拍、读错 bank（实测出 X）。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)            rd_base <= 7'd0;
-        else if (I_frame_done) rd_base <= 7'd0;
-        else if (do_swap)      rd_base <= wr_bank ? NEG[6:0] : 7'd0;
-    end
+    //  ★ 2026-10-16 代码清理：本 always 块**已下移到 `do_swap` 声明之后**
+    //    （原来在此处用到了下面才声明的 `do_swap`，TD 报 HDL-5007 "used before its declaration"）。
+    //    语义完全等价（always 块的位置不影响行为）；联合 TB 复跑逐字节一致。
 
     //=========================================================================
     //  4. 行间重叠比对 + label 指派 + 等价记录
@@ -412,34 +416,41 @@ module conn_label #(
     wire [LW-1:0] min_lbl;
 
     generate
-        for (gj = 0; gj < NEG; gj = gj + 1)
+        for (gj = 0; gj < NEG; gj = gj + 1) begin : g_lv1
             assign lv1[gj] = ovl_hit[gj] ? prv_lbl[gj] : {LW{1'b0}};
+        end
     endgenerate
 
     generate
         if (NEG == 8) begin : g_red8
             wire [LW-1:0] l4 [0:3];
             wire [LW-1:0] l2 [0:1];
-            for (gj = 0; gj < 4; gj = gj + 1)
+            for (gj = 0; gj < 4; gj = gj + 1) begin : g8_l4
                 assign l4[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
-            for (gj = 0; gj < 2; gj = gj + 1)
+            end
+            for (gj = 0; gj < 2; gj = gj + 1) begin : g8_l2
                 assign l2[gj] = min2(l4[2*gj], l4[2*gj + 1]);
+            end
             assign min_lbl = min2(l2[0], l2[1]);
         end else if (NEG == 4) begin : g_red4
             wire [LW-1:0] l2 [0:1];
-            for (gj = 0; gj < 2; gj = gj + 1)
+            for (gj = 0; gj < 2; gj = gj + 1) begin : g4_l2
                 assign l2[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
+            end
             assign min_lbl = min2(l2[0], l2[1]);
         end else if (NEG == 16) begin : g_red16
             wire [LW-1:0] l8 [0:7];
             wire [LW-1:0] l4 [0:3];
             wire [LW-1:0] l2 [0:1];
-            for (gj = 0; gj < 8; gj = gj + 1)
+            for (gj = 0; gj < 8; gj = gj + 1) begin : g16_l8
                 assign l8[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
-            for (gj = 0; gj < 4; gj = gj + 1)
+            end
+            for (gj = 0; gj < 4; gj = gj + 1) begin : g16_l4
                 assign l4[gj] = min2(l8[2*gj], l8[2*gj + 1]);
-            for (gj = 0; gj < 2; gj = gj + 1)
+            end
+            for (gj = 0; gj < 2; gj = gj + 1) begin : g16_l2
                 assign l2[gj] = min2(l4[2*gj], l4[2*gj + 1]);
+            end
             assign min_lbl = min2(l2[0], l2[1]);
         end else if (NEG == 2) begin : g_red2
             assign min_lbl = min2(lv1[0], lv1[1]);
@@ -580,6 +591,15 @@ module conn_label #(
     reg [3:0] swap_wait;
     wire      de_fall = I_de_d && !I_de;
     wire      do_swap = (swap_wait == 4'd1) && !ev_valid_r;
+
+    //  ★ 2026-10-16 代码清理：本 always 块从上面（rd_base 声明处）下移至此 ——
+    //    原来它用到了尚未声明的 `do_swap`（TD 报 HDL-5007 "used before its declaration"）。
+    //    语义完全等价：always 块与 assign 的位置不影响综合结果。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)            rd_base <= 7'd0;
+        else if (I_frame_done) rd_base <= 7'd0;
+        else if (do_swap)      rd_base <= wr_bank ? NEG[6:0] : 7'd0;
+    end
     // ★ v1.5.2：do_swap 的抑制条件随「行间比对轮」整体延后一拍 —— 用 ev_valid_r
     //   （而不是 ev_valid）。因为 ev_valid 那一拍事件还在「被流水寄存」，若此刻
     //   就交换 bank，下一拍（ev_valid_r 生效拍）回放读到的就是已经换过的 bank/q，
