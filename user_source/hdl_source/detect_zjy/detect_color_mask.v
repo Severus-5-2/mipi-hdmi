@@ -471,10 +471,6 @@ module detect_color_mask #(
     //  ★ 2026-10-15：门限来源二选一 ——
     //    NIGHT_EN=0 → 恒为 parameter MAG_TH（行为与改造前逐位一致）
     //    NIGHT_EN=1 → 用按 AE 帧平均亮度分档算出的 r_mag_th（见本文件末尾的状态机）
-    //  ★ 2026-10-16：从夜间状态机处**上移**（原来在 676/677 行，503 行先用了 `r_mag_th`）
-    reg [1:0]  r_band;       // 当前档位（夜间自适应）0~3
-    reg [7:0]  r_mag_th;     // 当前档位对应的幅度门限
-
     wire [7:0] w_mag_th = NIGHT_EN ? r_mag_th : MAG_TH;
     wire       w_mag_ok = (w_mag >= {1'b0, w_mag_th});
 
@@ -640,10 +636,8 @@ module detect_color_mask #(
     reg        s_tog_d;      // 上一拍 toggle，用于检出跳变沿
     reg        s_edge;       // 跳变沿（单拍）
     reg        s_edge_d;     // 再延 1 拍 → 此刻 I_y_avg 已稳定
-    //  ★ 2026-10-16 代码清理：`r_band` / `r_mag_th` 的**声明已上移**到 `w_mag_th`（503 行）之前
-    //    —— 原来声明在夜间状态机里（676/677 行），而 503 行先用了 `r_mag_th`，
-    //    TD 会报 HDL-5007 "identifier 'r_mag_th' is used before its declaration"。
-    //    语义完全等价（reg 声明是模块级的，位置不影响行为）。
+    reg [1:0]  r_band;       // 当前档位 0~3
+    reg [7:0]  r_mag_th;     // 当前档位对应的幅度门限
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
