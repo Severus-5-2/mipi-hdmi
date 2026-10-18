@@ -62,7 +62,12 @@ module motion_detect #(
     parameter integer BLK      = 16,        // 块边长（ds 域）
     parameter integer BGW      = DS_W/BLK,  // 20 块列
     parameter integer BGH      = 11,        // 11 块行（覆盖 ds 行 0..175）
-    parameter integer MOT_TH   = 20,        // 帧差阈值（8bit 亮度域）
+    parameter integer MOT_TH   = 32,        // 帧差阈值（8bit 亮度域）
+                                            // ★ 2026-10-18 22:15 由 20 改 32：本版降采样仍带
+                                            //   「最右一列代替所有列」的 bug ⇒ ds 只有真值一半 ⇒
+                                            //   等效门槛 = 2×MOT_TH = 64。三色目标像素差 >80 ⇒ 仍检出；
+                                            //   噪声侧余量翻倍。这是**纯常量改动**（不改网表结构），
+                                            //   而 M57 的结构改动会让 TD 合成出坏硬件（上板满屏雪花）。
                                             //   ★ 2026-10-18 晚：16 → 20（Z54 要求单独验证，已实测通过）
                                             //   机理：MOT_TH 只抬"单像素亮度差"门槛，**不动"块内像素数"**，
                                             //        所以慢速目标的帧差带（5px 竖条、幅度=目标亮度差）不会被砍。
