@@ -62,7 +62,10 @@ module motion_detect #(
     parameter integer BLK      = 16,        // 块边长（ds 域）
     parameter integer BGW      = DS_W/BLK,  // 20 块列
     parameter integer BGH      = 11,        // 11 块行（覆盖 ds 行 0..175）
-    parameter integer MOT_TH   = 32,        // 帧差阈值（8bit 亮度域）
+    parameter integer MOT_TH   = 36,        // 帧差阈值（8bit 亮度域）
+                                            // ★ 2026-10-18 22:57 由 32 改 36：
+                                            //   第 2 次下板（MOT_TH=32/等效 64）紫框仍在（能见 2 个大紫框），
+                                            //   再抬一档 ⇒ 等效门槛 72。三色目标像素差都 >100 ⇒ 仍有余量。
                                             // ★ 2026-10-18 22:15 由 20 改 32：本版降采样仍带
                                             //   「最右一列代替所有列」的 bug ⇒ ds 只有真值一半 ⇒
                                             //   等效门槛 = 2×MOT_TH = 64。三色目标像素差 >80 ⇒ 仍检出；
