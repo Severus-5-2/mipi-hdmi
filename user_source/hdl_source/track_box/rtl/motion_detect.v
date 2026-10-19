@@ -62,7 +62,13 @@ module motion_detect #(
     parameter integer BLK      = 16,        // 块边长（ds 域）
     parameter integer BGW      = DS_W/BLK,  // 20 块列
     parameter integer BGH      = 11,        // 11 块行（覆盖 ds 行 0..175）
-    parameter integer MOT_TH   = 36,        // 帧差阈值（8bit 亮度域）
+    parameter integer MOT_TH   = 52,        // 帧差阈值（8bit 亮度域）
+                                            // ★ 2026-10-19 15:05：36 → **52**（配合下方「零存储」降采样）。
+                                            //   量纲：本版 ds = 2 像素平均（σ_ds = 0.707σ），v5.1 的 8 像素是 0.354σ
+                                            //   ⇒ 要维持同样的假阳性率，阈值必须 ×2。
+                                            //   临界像素噪声：2像素+52 ⇒ σ≈29.4（8像素+36 是 40.7）
+                                            //   ⚠ 绝不能照搬现场的 36 —— 那个 36 跑在「半尺度」旧 ds 上（等效 72），
+                                            //     照搬到这里等于等效 26 ⇒ 紫框必然回来。
                                             // ★ 2026-10-18 22:57 由 32 改 36：
                                             //   第 2 次下板（MOT_TH=32/等效 64）紫框仍在（能见 2 个大紫框），
                                             //   再抬一档 ⇒ 等效门槛 72。三色目标像素差都 >100 ⇒ 仍有余量。
@@ -150,7 +156,6 @@ module motion_detect #(
     //==================================================================
     reg [8:0]  S_hacc;
     reg [8:0]  S_hpair;
-    reg [9:0]  S_vpair;
     reg [7:0]  S_ds;
     reg        S_ds_v;
     reg [8:0]  S_dsx;                           // ds 列号 0..319
@@ -160,7 +165,6 @@ module motion_detect #(
         if (!I_rst_n) begin
             S_hacc  <= 9'd0;
             S_hpair <= 9'd0;
-            S_vpair <= 10'd0;
             S_ds    <= 8'd0;
             S_ds_v  <= 1'b0;
             S_dsx   <= 9'd0;
@@ -177,11 +181,18 @@ module motion_detect #(
                 else if (I_pix_x[1:0] == 2'd2)
                     S_hpair <= S_hacc + {1'b0, W_gray};
 
+                // ★ 2026-10-19 15:05「零存储」降采样（收编张铭晨 M71 v5.2 的最小改动版）
+                //   旧写法（有 bug）：
+                //     y[1:0]==0 → S_vpair <= S_hpair;     // 单寄存器，整行每个像素钟都被覆盖
+                //     y[1:0]==1 → S_ds <= (S_vpair + S_hpair) >> 2;
+                //   后果：S_vpair 留下的是「最右一列」的值 ⇒ ① 非最右列 ds 只有真值一半；
+                //         ② 最右列的贡献与列无关 ⇒ 该块行所有块一起翻 ⇒ 一条 1 块行高的紫横条。
+                //   现在：**去掉垂直平均，只做水平 2 像素平均** ⇒ 零存储、无跨列状态。
+                //   取 y[1:0]==3（不是 ==1）：仍是"每 4 行取 1 行"，但垂直相位与 v5.1 一致
+                //     ⇒ 下游 TB / 黄金向量一个字节都不用改（12 帧输出逐字段相同）。
                 if (I_pix_x[1:0] == 2'd3) begin
-                    if (I_pix_y[1:0] == 2'd0)
-                        S_vpair <= {1'b0, S_hpair};
-                    else if (I_pix_y[1:0] == 2'd1) begin
-                        S_ds   <= (S_vpair + {1'b0, S_hpair}) >> 2;
+                    if (I_pix_y[1:0] == 2'd3) begin
+                        S_ds   <= S_hpair >> 1;     // 2 像素均值（与旧版 >>2 同尺度）
                         S_dsx  <= I_pix_x[10:2];    // = c
                         S_dsy  <= I_pix_y[9:2];     // = r
                         S_ds_v <= 1'b1;
