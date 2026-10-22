@@ -116,34 +116,59 @@ assign  rgb888_g_d0[0] = I_tdata_d0[8+:8];
 assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
 
 
-        ///削弱白色
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n) begin
-                rgb_sum[0] <= 0;
-            end
-            else if(I_tvalid)begin
-                rgb_sum[0] <= rgb888_r_d[0] + rgb888_g_d[0] + rgb888_b_d[0];
+    // Complete-frame gray-world statistics. All four lanes contribute equally;
+    // clipped whites and near-black samples do not determine channel gains.
+    reg user_d;
+    wire frame_boundary = I_tuser && !user_d;
+    always @(posedge I_clk or negedge I_rst_n)
+        if (!I_rst_n) user_d <= 0; else user_d <= I_tuser;
+
+    reg [9:0] group_r, group_g, group_b;
+    reg group_any;
+    integer lane;
+    reg [9:0] lane_sum;
+    always @* begin
+        group_r=0; group_g=0; group_b=0; group_any=0; lane_sum=0;
+        for (lane=0; lane<4; lane=lane+1) begin
+            lane_sum={2'b0,I_tdata_d0[lane*24+16 +:8]} +
+                     {2'b0,I_tdata_d0[lane*24+8 +:8]} + {2'b0,I_tdata_d0[lane*24 +:8]};
+            if (lane_sum>10'd12 && lane_sum<10'd720) begin
+                group_any=1;
+                group_r=group_r+I_tdata_d0[lane*24+16 +:8];
+                group_g=group_g+I_tdata_d0[lane*24+8 +:8];
+                group_b=group_b+I_tdata_d0[lane*24 +:8];
             end
         end
-
-        // 对每个通道的值进行累加，用于计算平均值
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if (!I_rst_n || I_tuser) begin
-                // 复位或行开始信号有效时，清零累加器
-                sum_r[0] <= 1;
-                sum_g[0] <= 1;
-                sum_b[0] <= 1;
-            end else if (I_tvalid_r0 && (rgb_sum[0] < 720)) begin
-                // 当输入有效时，累加RGB分量的值
-                sum_r[0] <= sum_r[0] + rgb888_r_d0[0];
-                sum_g[0] <= sum_g[0] + rgb888_g_d0[0];
-                sum_b[0] <= sum_b[0] + rgb888_b_d0[0];
+    end
+    reg [9:0] stats_r,stats_g,stats_b;
+    reg stats_valid,stats_nonempty;
+    reg [31:0] frame_r,frame_g,frame_b;
+    reg gain_start;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            stats_r<=0; stats_g<=0; stats_b<=0; stats_valid<=0;
+            sum_r[0]<=1; sum_g[0]<=1; sum_b[0]<=1;
+            frame_r<=1; frame_g<=1; frame_b<=1;
+            stats_nonempty<=0; gain_start<=0;
+        end else begin
+            stats_r<=group_r; stats_g<=group_g; stats_b<=group_b;
+            stats_valid<=I_tvalid_r0 && group_any && !frame_boundary;
+            gain_start<=0;
+            if (frame_boundary) begin
+                if (stats_nonempty) begin
+                    frame_r<=sum_r[0]; frame_g<=sum_g[0]; frame_b<=sum_b[0];
+                    gain_start<=1;
+                end
+                sum_r[0]<=1; sum_g[0]<=1; sum_b[0]<=1;
+                stats_nonempty<=0;
+            end else if (stats_valid) begin
+                sum_r[0]<=sum_r[0]+stats_r;
+                sum_g[0]<=sum_g[0]+stats_g;
+                sum_b[0]<=sum_b[0]+stats_b;
+                stats_nonempty<=1;
             end
         end
-
-  /*****************************************************************
-                           计算增益                                       
-*****************************************************************/
+    end
 
   wire [47:0] dout_R[3:0];
   wire [47:0] dout_B[3:0];
@@ -165,9 +190,9 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
       divider div_gen_G_R_r1 (
           .clk(I_clk),  // input wire aclk
           .rst(!I_rst_n),
-          .start(I_tvalid_r1),
-          .denominator(sum_r[0]),  // input wire [31 : 0] s_axis_divisor_tdata
-          .numerator({sum_g[0],16'd0}),  // input wire [47 : 0] s_axis_dividend_tdata
+          .start(gain_start),
+          .denominator(frame_r),  // input wire [31 : 0] s_axis_divisor_tdata
+          .numerator({frame_g,16'd0}),  // input wire [47 : 0] s_axis_dividend_tdata
           .quotient(dout_R[0]),  // output wire [79 : 0] m_axis_dout_tdata
           .done(done[0])
       );
@@ -175,9 +200,9 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
       divider divide_G_B_r1 (
           .clk(I_clk),  // input wire aclk
           .rst(!I_rst_n),
-          .start(I_tvalid_r1),
-          .denominator(sum_b[0]),  // input wire [31 : 0] s_axis_divisor_tdata
-          .numerator({sum_g[0],16'd0}),  // input wire [47 : 0] s_axis_dividend_tdata
+          .start(gain_start),
+          .denominator(frame_b),  // input wire [31 : 0] s_axis_divisor_tdata
+          .numerator({frame_g,16'd0}),  // input wire [47 : 0] s_axis_dividend_tdata
           .quotient(dout_B[0]),  // output wire [79 : 0] m_axis_dout_tdata
           .done()
       );
@@ -205,25 +230,37 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
                             ��������                                      
 *****************************************************************/
 
-    reg  [19:0]   in_r_r1;
-    reg  [19:0]   in_b_r1;
-    always @(posedge I_clk or negedge I_rst_n)begin 
-        if(!I_rst_n || I_tuser)begin
-            in_r_r1 <= 20'h10000;
-            in_b_r1 <= 20'h10000;
+    reg [19:0] in_r_r1,in_b_r1;
+    reg [19:0] pending_r,pending_b;
+    function [19:0] stable_gain;
+        input [19:0] previous;
+        input [47:0] quotient;
+        reg [19:0] limited;
+        reg signed [21:0] delta,updated;
+        begin
+            limited=(quotient<48'h08000)?20'h08000:
+                    (quotient>48'h40000)?20'h40000:quotient[19:0];
+            delta=$signed({2'b00,limited})-$signed({2'b00,previous});
+            updated=$signed({2'b00,previous})+(delta>>>2);
+            stable_gain=updated[19:0];
         end
-        else if(done[0])begin
-            if(|in_r_x1[47:20])
-                in_r_r1 <= 20'hfffff;
-            else 
-                in_r_r1 <= in_r_x1[19:0];
-            if(|in_b_x1[47:20])
-                in_b_r1 <= 20'hfffff;
-            else 
-                in_b_r1 <= in_b_x1[19:0];
+    endfunction
+    // A divider result updates the pending gain; only a frame boundary may
+    // change active gains. No spatial-prefix color drift within a frame.
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            in_r_r1<=20'h10000; in_b_r1<=20'h10000;
+            pending_r<=20'h10000; pending_b<=20'h10000;
+        end else begin
+            if (done[0]) begin
+                pending_r<=stable_gain(pending_r,in_r_x1);
+                pending_b<=stable_gain(pending_b,in_b_x1);
+            end
+            if (frame_boundary) begin
+                in_r_r1<=pending_r; in_b_r1<=pending_b;
+            end
         end
     end
-
 
     ////信号同步
     always @(posedge I_clk or negedge I_rst_n) begin

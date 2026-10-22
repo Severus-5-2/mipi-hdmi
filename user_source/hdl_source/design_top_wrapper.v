@@ -295,12 +295,9 @@ module design_top_wrapper (
     wire [3:0]  S_mot_valid;                // motion_detect：运动区域框（4 槽）
     wire [43:0] S_mot_xmin, S_mot_xmax;
     wire [39:0] S_mot_ymin, S_mot_ymax;
-    wire [7:0]  S_mot_cls;                  // 运动框统一按红画（cls 全 0）
     wire [2:0]  S_mot_cnt;                  // 运动区域数（0~4）
     wire        S_mot_pix, S_mot_pix_v;     // 运动像素（本版未用，留 ILA 调试）
     wire [7:0]  S_act_blk;                  // 上一帧活动块数
-    wire        S_mot_box_hit;              // 运动框命中（第二个 box_draw 实例）
-    wire [23:0] S_mot_box_color;
     wire        S_mcnt_hit;                 // "MOTION: N" 计数 OSD 命中
     wire [23:0] S_mcnt_color;
 
@@ -1184,7 +1181,7 @@ isp_top u_isp_top (
     //    ⚠ 三者的 I_frame_done 全部接 S_det_fdone（与总线锁存同源 ⇒ 早 0 拍，
     //      绝不会落进冻结表 §1.1 说的"中间地带"）
     //==================================================================
-    target_assoc u_target_assoc (
+    target_assoc #(.CAP_FILTER(1)) u_target_assoc (
         .I_clk         ( S_hdmi_pixel_clk ),
         .I_rst_n       ( S_hdmi_rst_n     ),
         .I_frame_done  ( S_det_fdone      ),
@@ -1223,41 +1220,8 @@ isp_top u_isp_top (
         .O_act_blk     ( S_act_blk        )
     );
 
-    assign S_mot_cls = 8'h00;      // 运动框统一按"红"画（box_draw 的 cls=0）
-
-    //---- 运动框：复用 box_draw 第二个实例（不画十字准星）----
-    box_draw #(
-        .SELF_TEST  ( 0 ),
-        //  ★★ 2026-10-16 临时调试用：运动框**改成品红 `ff00ff`**，只为和「跟踪框」区分开！
-        //     原因：跟踪框里 cls=0（红）也是纯红 `ff0000`，**两者颜色原来完全一样**，
-        //     导致现场那个"一直在的红框"到底是运动框还是红色目标的跟踪框**分不清**。
-        //     品红不在跟踪框的调色板（红/蓝/绿/黄）里 ⇒ 一眼可辨：
-        //        改完后"一圈框"变**品红** → 是运动框（张铭晨侧）
-        //        仍为**红色**            → 是跟踪框（本侧检测链）
-        //     ⚠ 定性完成后**应改回 `ff0000`**（单独一条提交，可整条回退）。
-        .COLOR_CLS0 ( 24'hff00ff ),
-        .COLOR_CLS1 ( 24'hff00ff ),
-        .COLOR_CLS2 ( 24'hff00ff ),
-        .COLOR_CLS3 ( 24'hff00ff )
-    )u_box_draw_motion(
-        .I_clk       ( S_hdmi_pixel_clk ),
-        .I_rst_n     ( S_hdmi_rst_n     ),
-        .I_de        ( S_hdmi_de        ),
-        .I_pix_x     ( S_pix_x          ),
-        .I_pix_y     ( S_pix_y          ),
-        .I_box_valid ( S_mot_valid      ),
-        .I_box_cls   ( S_mot_cls        ),
-        .I_box_xmin  ( S_mot_xmin       ),
-        .I_box_xmax  ( S_mot_xmax       ),
-        .I_box_ymin  ( S_mot_ymin       ),
-        .I_box_ymax  ( S_mot_ymax       ),
-        .I_cross_en  ( 1'b0             ),
-        .I_cross_x   ( 11'd640          ),
-        .I_cross_y   ( 10'd360          ),
-        .O_hit       ( S_mot_box_hit    ),
-        .O_color     ( S_mot_box_color  ),
-        .O_de        (                  )
-    );
+    // Motion rectangles removed at the user's request. Only color target
+    // tracking rectangles feed the display; the motion count OSD remains.
 
     //---- D8："MOTION: N" 计数 OSD ----
     //   ★ 2026-10-15 下板反馈：原来放 (16,48)（避让我方类别 OSD），但**左上角被常驻 Logo 占着**，
@@ -1404,7 +1368,10 @@ isp_top u_isp_top (
     conn_label #(
         .IMG_WIDTH  ( `IMG_WIDTH  ),
         .IMG_HEIGHT ( `IMG_HEIGHT ),
-        .MIN_AREA   ( `MIN_AREA    )     // 小面积噪声门限（冻结 v1.5 = 16，源自 common_defs.vh）
+        .MIN_AREA   ( `MIN_AREA    ),    // 小面积噪声门限
+        .CONTINUE_SHORT ( 1 ),           // preserve narrow connected edges; seed threshold stays 8
+        .COLOR_SEPARATE ( 1 ),           // touching red/blue/green objects remain distinct
+        .RESERVE_COLORS ( 1 )            // reserve labels for colors arriving later in raster order
     )u_conn_label(
         .clk            ( S_hdmi_pixel_clk ),
         .rst_n          ( S_hdmi_rst_n     ),
@@ -1433,7 +1400,8 @@ isp_top u_isp_top (
     );
 
     conn_features #(
-        .SLOT_N ( `TARGET_MAX )         // 4
+        .SLOT_N ( `TARGET_MAX ),        // 4
+        .FAIR_COLORS ( 1 )              // retain each color's best component before duplicates
     )u_conn_features(
         .clk               ( S_hdmi_pixel_clk ),
         .rst_n             ( S_hdmi_rst_n     ),
@@ -1478,16 +1446,14 @@ isp_top u_isp_top (
     localparam MASK_OVERLAY_EN = 0;
 
     assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
-    //  ★ 2026-10-14 合板：叠加仲裁加两档（运动框 / MOTION 计数）
-    //    优先级（高→低）：坐标 OSD > 跟踪框 > 类别 OSD > 运动框 > MOTION 计数 > 掩膜
+    //    优先级（高→低）：坐标 OSD > 跟踪框 > 类别 OSD > MOTION 计数 > 掩膜
     //    hdmi_mixer 不需要改 —— 所有人共用 S_ovl_hit / S_ovl_color 这一条通道。
     assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_dspk_mask : 1'b0)
                         | S_box_hit | S_coord_hit | S_cat_hit
-                        | S_mot_box_hit | S_mcnt_hit;
+                        | S_mcnt_hit;
     assign S_ovl_color  = S_coord_hit     ? S_coord_color    :
                           S_box_hit       ? S_box_color      :
                           S_cat_hit       ? S_cat_color      :
-                          S_mot_box_hit   ? S_mot_box_color  :
                           S_mcnt_hit      ? S_mcnt_color     :
                                             S_mask_color;
 

@@ -16,8 +16,8 @@
 //      ④ 帧末统计      ：每 label 的 area(Σ1) / Σx / Σy / xmin,xmax / ymin,ymax
 //      ⑤ 消隐期质心除法：cx=Σx/area，移位-减法除法器，不在像素流里做
 //      ⑥ 颜色分类      ：每 label 锁存「首个被指派时的已知色」，帧末随
-//                        O_cmp_cls 输出（`CLS_*`；未知 2'b11）。**不参与连通判定**，
-//                        I_color 接 2'b11 即退化为「未分类」（运动检测用）。
+//                        O_cmp_cls 输出（`CLS_*`；未知 2'b11）。默认不参与连通判定。
+//                        COLOR_SEPARATE=1 时，行内与行间都要求颜色一致。
 //
 //  连通性：**4 连通**（判据 start<=prev_end && end>=prev_start）
 //
@@ -49,7 +49,10 @@ module conn_label #(
     //   （不建 label / 不合并 / 不统计 / 不写 rbuf）⇒ 噪点不占 NEG 名额。
     //   ⚠ 这是**可被 TB 覆盖**的 parameter：`tb_conn_label.v` 用小图样，
     //     例化时传 `.LMIN(1)` 保持完整测试覆盖；工程顶层**不传**，用默认值 8。
-    parameter integer LMIN       = 8               // 单行游程最小长度（4~16 可调）
+    parameter integer LMIN       = 8,              // 单行游程最小长度（4~16 可调）
+    parameter integer CONTINUE_SHORT = 0,          // retain narrow tails of an existing component
+    parameter integer COLOR_SEPARATE = 0,          // split runs/components at class boundaries
+    parameter integer RESERVE_COLORS = 0           // keep one unused label for each unseen RGB class
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -148,7 +151,12 @@ module conn_label #(
     //    导致下一帧开局用错 bank-0 → 全帧静默错位。
     //    加 !ev_valid 后改为「ev_valid 落下的下一拍」进 FSM，此时 ev_valid_r 已消费完毕。
     //    代价：FSM 起点晚 1 拍（消隐期 49500 拍，可忽略）。
-    wire frame_end = I_de_d && !I_de && (I_pix_y == YLAST) && !ev_valid;
+    wire frame_end_pre = I_de_d && !I_de && (I_pix_y == YLAST) && !ev_valid;
+    reg frame_end;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) frame_end <= 1'b0;
+        else frame_end <= frame_end_pre;
+    end
 
     //=========================================================================
     //  1. 等价表（并查表，纯寄存器） + 3 级展开解析
@@ -229,6 +237,20 @@ module conn_label #(
                         run_len  <= 20'd1;
                         run_sumx <= {10'd0, I_pix_x};
                         run_cls  <= I_color;               // 游程首像素颜色
+                    end else if (COLOR_SEPARATE && I_color != run_cls) begin
+                        // Close the old class at x-1 and seed the new class at x.
+                        // No mask gap is required between differently colored objects.
+                        ev_valid <= 1'b1;
+                        ev_x0    <= run_x0;
+                        ev_x1    <= I_pix_x - 11'd1;
+                        ev_len   <= run_len;
+                        ev_sumx  <= run_sumx;
+                        ev_y     <= I_pix_y;
+                        ev_cls   <= run_cls;
+                        run_x0   <= I_pix_x;
+                        run_len  <= 20'd1;
+                        run_sumx <= {10'd0, I_pix_x};
+                        run_cls  <= I_color;
                     end else begin
                         run_len  <= run_len  + 20'd1;
                         run_sumx <= run_sumx + {10'd0, I_pix_x};
@@ -271,6 +293,7 @@ module conn_label #(
     reg [10:0]   rbuf_s [0:2*NEG-1];
     reg [10:0]   rbuf_e [0:2*NEG-1];
     reg [LW-1:0] rbuf_l [0:2*NEG-1];
+    reg [1:0]    rbuf_c [0:2*NEG-1];
     reg [LW-1:0] cnt_wr, cnt_rd;
     reg          wr_bank;
 
@@ -330,7 +353,8 @@ module conn_label #(
             wire j_valid = (gj < cnt_rd);
             wire hit_raw = j_valid
                          && (ev_x0 <= rbuf_e[rd_base + gj])
-                         && (ev_x1 >= rbuf_s[rd_base + gj]);   // 4 连通水平重叠
+                         && (ev_x1 >= rbuf_s[rd_base + gj])
+                         && (!COLOR_SEPARATE || ev_cls == rbuf_c[rd_base + gj]);
             assign ovl_hit_raw[gj] = hit_raw && ev_valid;
             assign prv_lbl_raw[gj] = hit_raw ? resolve3(rbuf_l[rd_base + gj]) : {LW{1'b0}};
         end
@@ -450,10 +474,17 @@ module conn_label #(
 
     //---- 新 label 分配（7 bit 便于判越界）----
     reg [6:0]     lbl_next;
+    reg [2:0]     seen_colors;
+    // Labels remain contiguous for the existing frame summary FSM. Stop
+    // allocating extra islands before they consume unseen colors' last slots.
+    wire [6:0] reserve_need = RESERVE_COLORS ?
+        ((!seen_colors[0] && ev_cls_r != 2'd0) ? 7'd1 : 7'd0) +
+        ((!seen_colors[1] && ev_cls_r != 2'd1) ? 7'd1 : 7'd0) +
+        ((!seen_colors[2] && ev_cls_r != 2'd2) ? 7'd1 : 7'd0) : 7'd0;
     wire          need_new = (min_lbl == {LW{1'b0}});
     // ★ 面积优化（v1.5.1）：分配上限改为内部深度 CC_MAX(=NEG)，不再用接口宏 LBMAX(=32)。
     //   保证分配出的 label 一定落在 NEG 项数组（eq/cls_lbl/acc_*）的合法下标内。
-    wire          lbl_ok   = !(need_new && (lbl_next > {1'b0, CC_MAX}));
+    wire          lbl_ok   = !need_new || (lbl_next <= ({1'b0, CC_MAX} - reserve_need));
     wire [LW-1:0] fresh    = lbl_next[LW-1:0];
     wire [LW-1:0] lbl_use  = need_new ? fresh : min_lbl;
     // ★ v1.5.2：门控 —— 只要求「事件有效 + label 未溢出」。
@@ -466,7 +497,8 @@ module conn_label #(
     //       不累加统计、不写游程缓冲。
     //     ⇒ 噪点**根本不占用 NEG 名额**，真目标不会被挤出去。
     //     （`ev_len_r` 与 `ev_valid_r` 同一拍有效，均来自行 356 的同步打拍。）
-    wire          ev_long  = (ev_len_r >= LMIN[19:0]);
+    wire          ev_long  = (ev_len_r >= LMIN[19:0]) ||
+                             (CONTINUE_SHORT && !need_new && ev_len_r >= 20'd2);
     wire          ev_ok    = ev_valid_r && lbl_ok && ev_long;
 
     //---- 等价合并：与 min_lbl 不同且重叠的 label → 并入 min_lbl ----
@@ -490,14 +522,21 @@ module conn_label #(
             lbl_next <= lbl_next + 7'd1;
     end
 
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) seen_colors <= 3'b000;
+        else if (I_frame_done) seen_colors <= 3'b000;
+        else if (ev_ok && need_new && ev_cls_r != 2'd3)
+            seen_colors[ev_cls_r] <= 1'b1;
+    end
+
     //=========================================================================
-    //  4.1 每 label 颜色锁存（仅供 cls 分类，**不参与连通判定**）
+    //  4.1 每 label 颜色锁存（COLOR_SEPARATE=1 的边界判定由游程颜色完成）
     //      规则：取该连通域「首次被指派时的已知色」（游程内首个非 UNKNOWN 像素）；
     //            等价合并时把颜色沿并查链往根传播，保证链式合并（eq[5]=3、eq[3]=1）
     //            也能把颜色带到最终根；
     //            全程未知 ⇒ 2'b11（`CLS_UNKNOWN`）。
-    //      ⚠ 前提：同一连通域内颜色一致（红球/蓝方块/绿三角各占一色）。
-    //        若一块区域内混色，则取首个被指派游程的色，属已知的简化。
+    //      默认模式要求同一连通域内颜色一致；混色时取首次颜色。
+    //      顶层启用 COLOR_SEPARATE，同一连通域不会混入另一颜色的游程。
     //=========================================================================
     reg [1:0] cls_lbl [0:NEG];
 
@@ -541,6 +580,29 @@ module conn_label #(
 
     reg        acc_clr;                           // 帧末清零脉冲
 
+    // Separate label selection from accumulator addressing/addition. This breaks
+    // the high-fanout prv_lbl -> min_lbl -> accumulator/DSP path.
+    reg stat_valid;
+    reg [LW-1:0] stat_label;
+    reg [19:0] stat_len;
+    reg [20:0] stat_sumx;
+    reg [10:0] stat_x0, stat_x1;
+    reg [9:0] stat_y;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            stat_valid <= 1'b0;
+            stat_label <= 0; stat_len <= 0; stat_sumx <= 0;
+            stat_x0 <= 0; stat_x1 <= 0; stat_y <= 0;
+        end else begin
+            stat_valid <= ev_ok && !I_frame_done && !acc_clr;
+            if (ev_ok) begin
+                stat_label <= lbl_use; stat_len <= ev_len_r;
+                stat_sumx <= ev_sumx_r;
+                stat_x0 <= ev_x0_r; stat_x1 <= ev_x1_r; stat_y <= ev_y_r;
+            end
+        end
+    end
+
     integer ai;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -563,14 +625,14 @@ module conn_label #(
                 acc_ymin[ai] <= YINIT;
                 acc_ymax[ai] <= 10'd0;
             end
-        end else if (ev_ok) begin
-            acc_area[lbl_use] <= acc_area[lbl_use] + ev_len_r;
-            acc_sumx[lbl_use] <= acc_sumx[lbl_use] + {10'd0, ev_sumx_r};
-            acc_sumy[lbl_use] <= acc_sumy[lbl_use] + ({10'd0, ev_y_r} * {12'd0, ev_len_r});
-            if (ev_x0_r < acc_xmin[lbl_use]) acc_xmin[lbl_use] <= ev_x0_r;
-            if (ev_x1_r > acc_xmax[lbl_use]) acc_xmax[lbl_use] <= ev_x1_r;
-            if (ev_y_r  < acc_ymin[lbl_use]) acc_ymin[lbl_use] <= ev_y_r;
-            if (ev_y_r  > acc_ymax[lbl_use]) acc_ymax[lbl_use] <= ev_y_r;
+        end else if (stat_valid) begin
+            acc_area[stat_label] <= acc_area[stat_label] + stat_len;
+            acc_sumx[stat_label] <= acc_sumx[stat_label] + {10'd0, stat_sumx};
+            acc_sumy[stat_label] <= acc_sumy[stat_label] + ({10'd0, stat_y} * {12'd0, stat_len});
+            if (stat_x0 < acc_xmin[stat_label]) acc_xmin[stat_label] <= stat_x0;
+            if (stat_x1 > acc_xmax[stat_label]) acc_xmax[stat_label] <= stat_x1;
+            if (stat_y  < acc_ymin[stat_label]) acc_ymin[stat_label] <= stat_y;
+            if (stat_y  > acc_ymax[stat_label]) acc_ymax[stat_label] <= stat_y;
         end
     end
 
@@ -610,6 +672,7 @@ module conn_label #(
                     rbuf_s[wr_base + cnt_wr] <= ev_x0_r;
                     rbuf_e[wr_base + cnt_wr] <= ev_x1_r;
                     rbuf_l[wr_base + cnt_wr] <= need_new ? fresh : min_lbl;
+                    rbuf_c[wr_base + cnt_wr] <= ev_cls_r;
                     cnt_wr <= cnt_wr + 6'd1;
                 end
                 // cnt_wr 满：丢游程（只保留统计），已如实记录为降级行为

@@ -32,13 +32,16 @@
 //  ── 已知边界 ──────────────────────────────────────────────────────────────
 //      · 仅保证**同一帧内**的槽位次序；跨帧槽号不保证指向同一目标（冻结表 §2.3）。
 //      · 目标数 >4 时只保留面积最大的 4 个，其余丢弃（方案B §3.1 深度 4）。
+//      · FAIR_COLORS=1：先保护各颜色最大连通域，再按面积填充剩余名额；
+//        仍输出 4 槽且按面积排序，同一颜色的较小目标可能让位于另一颜色。
 //=============================================================================
 
 `timescale 1ns / 1ps
 `include "common_defs.vh"
 
 module conn_features #(
-    parameter integer SLOT_N = `TARGET_MAX        // 4（降级为单目标检测时可改 1）
+    parameter integer SLOT_N = `TARGET_MAX,       // 4（降级为单目标检测时可改 1）
+    parameter integer FAIR_COLORS = 0            // preserve the best component of each class
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -156,6 +159,59 @@ module conn_features #(
     wire [SW-1:0] n2 = (i0 | i1) ? s1 : (i2 ? new_slot : s2);
     wire [SW-1:0] n3 = (~sh2)   ? s2 : (i3 ? new_slot : s3);
 
+    // The working list stays sorted by beat(). Protect each class's first
+    // (best) entry when an incoming component has a different class. A new
+    // class may replace a duplicate even if its area is smaller.
+    wire [1:0] new_cls = new_slot[SF_CLS +: 2];
+    wire [1:0] c0 = s0[SF_CLS +: 2], c1 = s1[SF_CLS +: 2];
+    wire [1:0] c2 = s2[SF_CLS +: 2], c3 = s3[SF_CLS +: 2];
+    wire live0 = (s0[SF_AREA +: 20] != 0);
+    wire live1 = (s1[SF_AREA +: 20] != 0);
+    wire live2 = (s2[SF_AREA +: 20] != 0);
+    wire live3 = (s3[SF_AREA +: 20] != 0);
+    wire eligible0 = !live0 || new_cls == c0;
+    wire eligible1 = !live1 || new_cls == c1 || (live0 && c1 == c0);
+    wire eligible2 = !live2 || new_cls == c2 || (live0 && c2 == c0) || (live1 && c2 == c1);
+    wire eligible3 = !live3 || new_cls == c3 || (live0 && c3 == c0) ||
+                     (live1 && c3 == c1) || (live2 && c3 == c2);
+    wire [1:0] victim = eligible3 ? 2'd3 : eligible2 ? 2'd2 : eligible1 ? 2'd1 : 2'd0;
+    wire [SW-1:0] victim_slot = eligible3 ? s3 : eligible2 ? s2 : eligible1 ? s1 : s0;
+    wire missing_color = new_cls != 2'd3 &&
+        !((live0 && new_cls == c0) || (live1 && new_cls == c1) ||
+          (live2 && new_cls == c2) || (live3 && new_cls == c3));
+    wire fair_accept = (I_cmp_area != 0) && (eligible0 || eligible1 || eligible2 || eligible3) &&
+                       (missing_color || beat(new_slot, victim_slot));
+
+    reg [SW-1:0] fair0, fair1, fair2, fair3;
+    always @* begin
+        // Remove the victim, then insert into the other three sorted entries.
+        // b0..b3 are reused; no second area comparison chain is needed.
+        case (victim)
+            2'd0: begin
+                fair0 = b1 ? new_slot : s1;
+                fair1 = b1 ? s1 : b2 ? new_slot : s2;
+                fair2 = (b1 | b2) ? s2 : b3 ? new_slot : s3;
+                fair3 = b3 ? s3 : new_slot;
+            end
+            2'd1: begin
+                fair0 = b0 ? new_slot : s0;
+                fair1 = b0 ? s0 : b2 ? new_slot : s2;
+                fair2 = (b0 | b2) ? s2 : b3 ? new_slot : s3;
+                fair3 = b3 ? s3 : new_slot;
+            end
+            2'd2: begin
+                fair0 = b0 ? new_slot : s0;
+                fair1 = b0 ? s0 : b1 ? new_slot : s1;
+                fair2 = (b0 | b1) ? s1 : b3 ? new_slot : s3;
+                fair3 = b3 ? s3 : new_slot;
+            end
+            default: begin
+                fair0 = n0; fair1 = n1; fair2 = n2;
+                fair3 = (b0 | b1 | b2) ? s2 : new_slot;
+            end
+        endcase
+    end
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             s0 <= {SW{1'b0}}; s1 <= {SW{1'b0}};
@@ -171,8 +227,11 @@ module conn_features #(
                 s0 <= {SW{1'b0}}; s1 <= {SW{1'b0}};
                 s2 <= {SW{1'b0}}; s3 <= {SW{1'b0}};
                 O_update <= 1'b1;
-            end else if (I_cmp_valid) begin
-                s0 <= n0; s1 <= n1; s2 <= n2; s3 <= n3;
+            end else if (I_cmp_valid && (!FAIR_COLORS || fair_accept)) begin
+                s0 <= FAIR_COLORS ? fair0 : n0;
+                s1 <= FAIR_COLORS ? fair1 : n1;
+                s2 <= FAIR_COLORS ? fair2 : n2;
+                s3 <= FAIR_COLORS ? fair3 : n3;
             end
         end
     end

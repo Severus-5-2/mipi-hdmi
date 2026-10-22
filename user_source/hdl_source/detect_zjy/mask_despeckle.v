@@ -251,7 +251,10 @@ module mask_despeckle #(
     wire [1:0] W_vote = {1'b0, R_cur2} + {1'b0, R_k1} + {1'b0, K2_raw};
     wire       W_vote_ok = (W_vote >= VER_NEED[1:0]) | R_hs2;
 
-    wire W_mask_dspk = ENABLE ? (W_vote_ok & R_cur2) : R_cur2;
+    // Line RAM retains the preceding frame's bottom rows. They are not valid
+    // vertical neighbors for rows 0/1 and must not consume CCL labels at frame top.
+    wire W_history_valid = (R_pre_py[19:10] >= 10'd2) && R_pre_de[1];
+    wire W_mask_dspk = ENABLE ? (W_history_valid & W_vote_ok & R_cur2) : R_cur2;
 
     //  ★ 投票结果 / 延后 2 拍的其它信号，就是新的「对齐基准」A2_*
     wire        A2_de = R_pre_de[1];

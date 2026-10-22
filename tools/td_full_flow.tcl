@@ -1,3 +1,4 @@
+set build_start [clock seconds]
 puts "===== 1 import device ====="
 import_device ph1_35p.db -package PH1P35MDG324 -speed 3
 
@@ -18,9 +19,8 @@ wait_run phy_1 -quiet
 puts "===== phy_1 done ====="
 
 puts "===== 6 reports ====="
-report_timing_summary -file ./cmd_timing_summary.rpt
-report_area -file ./cmd_area.rpt
-report_qor -step route -file ./cmd_qor.rpt
+puts "Checking native phy_1 reports (controller has no imported netlist)"
+foreach result {camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display_pr.timing camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display_phy.area camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit} {if {![file exists $result] || [file size $result] == 0 || [file mtime $result] < $build_start} {puts stderr "BUILD FAILED: missing or stale result $result"; exit 1}}
 puts "===== reports done ====="
 
 puts "===== ALL DONE ====="

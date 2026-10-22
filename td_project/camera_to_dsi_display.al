@@ -467,7 +467,6 @@
                     <Attr Name="CompileOrder" Val="72"/>
                 </FileInfo>
             </File>
-
             <File Path="../user_source/hdl_source/track_box/rtl/motion_detect.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
@@ -476,7 +475,6 @@
                     <Attr Name="CompileOrder" Val="73"/>
                 </FileInfo>
             </File>
-
             <File Path="../user_source/hdl_source/track_box/rtl/osd_motion_cnt.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
@@ -661,7 +659,7 @@
             <UserParams>
             </UserParams>
         </Run>
-        <Run Name="phy_1" Type="PhysicalDesign" ConstraintSet="constraint_1" Description="" SynRun="syn_1" Active="true">
+        <Run Name="phy_1" Type="PhysicalDesign" ConstraintSet="constraint_1" Description="" SynRun="syn_1" Active="true" useDefaultScript="false">
             <Strategy Name="Default_PhysicalDesign_Strategy">
                 <BitgenProperty::GeneralOption>
                     <compress>on</compress>

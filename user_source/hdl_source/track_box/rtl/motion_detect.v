@@ -6,11 +6,11 @@
 //
 //  做什么
 //    对显示流做「帧差法」运动检测：相邻两帧同位置亮度差超阈值即为运动像素，
-//    再经「块密度门控 + 游程合并」，输出最多 4 个运动区域框 + 区域数量。
+//    再经「块密度门控 + 游程合并」，把所有有效运动区域合成一个总包围框输出。
 //
 //  五级流水（全部在像素时钟域）
 //    ① 灰度      ：复用工程已编译的 rgb2gray（BT.601，77/150/29 >>8），不另起一套
-//    ② 1/4 降采样：每个 4×4 块取**左上 2×2 求平均**（>>2）→ 320×180 的 ds 域
+//    ② 1/4 降采样：每 4 行采一行，水平 2 像素平均 → 320×180 的 ds 域
 //    ③ 帧差      ：与上一帧 BRAM 同址比较，|ΔY| >= MOT_TH → 运动位
 //    ④ 块密度门控：ds 域 16×16 块内统计运动像素数，>= BLK_MIN 才算「该块在动」
 //                  ★ 下限是主力去噪：孤立噪点/色度漂移凑不满一个块
@@ -42,8 +42,8 @@
 //
 //  ⚠ 已知固有特性（帧差法的物理限制，非 bug）
 //    物体匀速移动时，差分会同时出现「新位置」和「旧位置」两块区域；位移小于
-//    物体尺寸时两者重叠被合并成 1 个框，位移大于物体尺寸时会得到 2 个框。
-//    这是帧差法本身的特性，若要单目标单框需引入背景建模/运动历史。
+//    物体尺寸时两者重叠，位移大时内部区域可能分裂。当前输出将这些区域合成一框，
+//    会覆盖旧位置、新位置及两者之间的运动范围；多个同时运动的物体也会被合并。
 //
 //  时序/规模
 //    一帧一次输出：在 I_frame_done（帧首有效像素）把当前框表锁存到 O_*，
@@ -103,7 +103,8 @@ module motion_detect #(
                                             //   默认 20 = 只杀"20 块全活跃"的完全全宽行（最保守）；
                                             //   设 21 = 关闭本功能；设 18 更激进（>=90% 就丢）。
     parameter integer MIN_SPAN_BLK = 2,     // 区域框最小跨块数（滤单块伪影）
-    parameter integer MAXBOX   = 4          // 输出区域框上限（对齐 box_draw 4 槽）
+    parameter integer MAXBOX   = 4,         // 内部候选区域数上限；公开输出合成为 1 个总框
+    parameter integer REJECT_GLOBAL = 1    // near-full-frame union is global scene change
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -117,13 +118,13 @@ module motion_detect #(
     // ---- 帧界（= 工程 S_frame_done，帧首有效像素）----
     input  wire        I_frame_done,
 
-    // ---- 输出：运动区域框（全分辨率像素坐标，块坐标 ×64）----
+    // ---- 输出：slot 0 为全帧运动总框；其余槽清零（像素坐标，块坐标 ×64）----
     output reg  [MAXBOX*1 -1:0] O_mot_valid,
     output reg  [MAXBOX*11-1:0] O_mot_xmin,
     output reg  [MAXBOX*11-1:0] O_mot_xmax,
     output reg  [MAXBOX*10-1:0] O_mot_ymin,
     output reg  [MAXBOX*10-1:0] O_mot_ymax,
-    output reg  [2:0]           O_mot_cnt,      // 运动区域数（0~4）
+    output reg  [2:0]           O_mot_cnt,      // 是否有有效运动总框（0 或 1）
 
     // ---- 诊断/上板观测 ----
     output wire        O_mot_pix,               // 当前 ds 样点是否为运动像素
@@ -145,10 +146,9 @@ module motion_detect #(
     );
 
     //==================================================================
-    // 2. 1/4 降采样（每个 4×4 块取左上 2×2 平均）
+    // 2. 1/4 降采样（每 4 行采一行，水平 2 像素平均）
     //    水平：x[1:0]=1 起累加，x[1:0]=2 得到 2 像素和（1 拍后 S_hpair 有效）
-    //    垂直：y[1:0]=0 锁存上半行对，y[1:0]=1 与下半行对相加 → >>2
-    //    有效点落在 x[1:0]=3 & y[1:0]=1 那一拍
+    //    有效点落在 x[1:0]=3 & y[1:0]=3 那一拍
     //
     //    ⚠ 本拍同时把该 ds 样点的**真实坐标** (dsx,dsy) 一起锁存。
     //      不能在下一拍再去取 I_pix_x[10:2] —— 那时 x 已经 +1，算出来是 c+1，
@@ -214,6 +214,20 @@ module motion_detect #(
     reg [7:0]  S_fbuf [0:DS_W*DS_H-1];
     reg [15:0] S_raddr;
     reg [7:0]  S_rdata;
+
+    // RAM 不复位，保留 BRAM 推断。复位后先等待帧首，再完整写入一帧；
+    // 第二个帧首起才允许报告帧差，避免上电未知数据或帧中复位的残帧误报。
+    reg S_frame_seen;
+    reg S_prev_frame_valid;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if (!I_rst_n) begin
+            S_frame_seen       <= 1'b0;
+            S_prev_frame_valid <= 1'b0;
+        end else if (I_frame_done) begin
+            S_frame_seen       <= 1'b1;
+            S_prev_frame_valid <= S_frame_seen;
+        end
+    end
 
     reg        S_st1;
     reg        S_st2;
@@ -282,7 +296,7 @@ module motion_detect #(
             S_mot_v <= 1'b0;
             S_we    <= 1'b0;
             if (S_st2) begin
-                S_mot   <= W_mot;
+                S_mot   <= W_mot && S_prev_frame_valid;
                 S_mot_v <= 1'b1;
                 S_we    <= 1'b1;
             end
@@ -378,6 +392,37 @@ module motion_detect #(
     end
     endgenerate
 
+    // 输出一个覆盖整帧所有有效运动区域的总包围框。
+    // 帧差对移动物体会同时标出旧位置和新位置；分别输出碎框不代表物体完整范围，
+    // 将所有有效连通区域合并成一框后，可稳定覆盖这两处及其间的移动范围。
+    reg             W_union_valid;
+    reg [4:0]       W_union_xmin, W_union_xmax;
+    reg [3:0]       W_union_ymin, W_union_ymax;
+    integer         u;
+    always @* begin
+        W_union_valid = 1'b0;
+        W_union_xmin  = {5{1'b1}};
+        W_union_xmax  = 5'd0;
+        W_union_ymin  = {4{1'b1}};
+        W_union_ymax  = 4'd0;
+        for (u = 0; u < MAXBOX; u = u + 1) begin
+            if (S_boxv[u] && W_big[u]) begin
+                W_union_valid = 1'b1;
+                if (S_bx1[u] < W_union_xmin) W_union_xmin = S_bx1[u];
+                if (S_bx2[u] > W_union_xmax) W_union_xmax = S_bx2[u];
+                if (S_by1[u] < W_union_ymin) W_union_ymin = S_by1[u];
+                if (S_by2[u] > W_union_ymax) W_union_ymax = S_by2[u];
+            end
+        end
+    end
+
+    // Frame differencing cannot distinguish camera motion from object motion.
+    // Avoid presenting a near-screen-sized union as a localized moving target.
+    wire W_global_change = REJECT_GLOBAL && W_union_valid &&
+        (({1'b0,W_union_xmax} - {1'b0,W_union_xmin} + 6'd1) >= BGW-2) &&
+        (({1'b0,W_union_ymax} - {1'b0,W_union_ymin} + 5'd1) >= BGH-2);
+    wire W_union_publish = W_union_valid && !W_global_change;
+
     always @(posedge I_clk or negedge I_rst_n) begin
         if (!I_rst_n) begin
             S_gst     <= G_IDLE;
@@ -411,31 +456,17 @@ module motion_detect #(
                 //------------------------------------------------------
                 // 帧界：锁存上一帧结果；清框表，开新一帧
                 //------------------------------------------------------
-                O_mot_valid[0] <= S_boxv[0] && W_big[0];
-                O_mot_valid[1] <= S_boxv[1] && W_big[1];
-                O_mot_valid[2] <= S_boxv[2] && W_big[2];
-                O_mot_valid[3] <= S_boxv[3] && W_big[3];
+                O_mot_valid <= {{(MAXBOX-1){1'b0}}, W_union_publish};
                 // 坐标一律用 valid 门控：无效槽输出全 0（接口自洽，避免残留旧框）
-                O_mot_xmin [0*11 +: 11] <= (S_boxv[0] && W_big[0]) ? {S_bx1[0], 6'b000000} : 11'd0;
-                O_mot_xmin [1*11 +: 11] <= (S_boxv[1] && W_big[1]) ? {S_bx1[1], 6'b000000} : 11'd0;
-                O_mot_xmin [2*11 +: 11] <= (S_boxv[2] && W_big[2]) ? {S_bx1[2], 6'b000000} : 11'd0;
-                O_mot_xmin [3*11 +: 11] <= (S_boxv[3] && W_big[3]) ? {S_bx1[3], 6'b000000} : 11'd0;
-                O_mot_xmax [0*11 +: 11] <= (S_boxv[0] && W_big[0]) ? ({S_bx2[0] + 5'd1, 6'b000000} - 11'd1) : 11'd0;
-                O_mot_xmax [1*11 +: 11] <= (S_boxv[1] && W_big[1]) ? ({S_bx2[1] + 5'd1, 6'b000000} - 11'd1) : 11'd0;
-                O_mot_xmax [2*11 +: 11] <= (S_boxv[2] && W_big[2]) ? ({S_bx2[2] + 5'd1, 6'b000000} - 11'd1) : 11'd0;
-                O_mot_xmax [3*11 +: 11] <= (S_boxv[3] && W_big[3]) ? ({S_bx2[3] + 5'd1, 6'b000000} - 11'd1) : 11'd0;
-                O_mot_ymin [0*10 +: 10] <= (S_boxv[0] && W_big[0]) ? {S_by1[0], 6'b000000} : 10'd0;
-                O_mot_ymin [1*10 +: 10] <= (S_boxv[1] && W_big[1]) ? {S_by1[1], 6'b000000} : 10'd0;
-                O_mot_ymin [2*10 +: 10] <= (S_boxv[2] && W_big[2]) ? {S_by1[2], 6'b000000} : 10'd0;
-                O_mot_ymin [3*10 +: 10] <= (S_boxv[3] && W_big[3]) ? {S_by1[3], 6'b000000} : 10'd0;
-                O_mot_ymax [0*10 +: 10] <= (S_boxv[0] && W_big[0]) ? ({S_by2[0], 6'b000000} + 10'd63) : 10'd0;
-                O_mot_ymax [1*10 +: 10] <= (S_boxv[1] && W_big[1]) ? ({S_by2[1], 6'b000000} + 10'd63) : 10'd0;
-                O_mot_ymax [2*10 +: 10] <= (S_boxv[2] && W_big[2]) ? ({S_by2[2], 6'b000000} + 10'd63) : 10'd0;
-                O_mot_ymax [3*10 +: 10] <= (S_boxv[3] && W_big[3]) ? ({S_by2[3], 6'b000000} + 10'd63) : 10'd0;
-                O_mot_cnt   <= {2'b00, (S_boxv[0] && W_big[0])} +
-                               {2'b00, (S_boxv[1] && W_big[1])} +
-                               {2'b00, (S_boxv[2] && W_big[2])} +
-                               {2'b00, (S_boxv[3] && W_big[3])};
+                O_mot_xmin [0*11 +: 11] <= W_union_publish ? {W_union_xmin, 6'b000000} : 11'd0;
+                O_mot_xmax [0*11 +: 11] <= W_union_publish ? ({W_union_xmax + 5'd1, 6'b000000} - 11'd1) : 11'd0;
+                O_mot_ymin [0*10 +: 10] <= W_union_publish ? {W_union_ymin, 6'b000000} : 10'd0;
+                O_mot_ymax [0*10 +: 10] <= W_union_publish ? ({W_union_ymax, 6'b000000} + 10'd63) : 10'd0;
+                O_mot_xmin [1*11 +: 33] <= 33'd0;
+                O_mot_xmax [1*11 +: 33] <= 33'd0;
+                O_mot_ymin [1*10 +: 30] <= 30'd0;
+                O_mot_ymax [1*10 +: 30] <= 30'd0;
+                O_mot_cnt   <= {2'b00, W_union_publish};
                 O_act_blk   <= S_act;
                 S_act       <= 8'd0;
                 // 无效槽的坐标一并清零（否则会残留上一帧旧框坐标，接口不自洽）

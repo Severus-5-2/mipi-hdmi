@@ -91,7 +91,9 @@ module target_assoc #(
     //
     //    ⚠ 但这只是**安全网**，不是主方案：更稳的做法是把 `I_frame_done`
     //      接到与总线锁存**同源**的那一路（`S_det_fdone`），此时相位差为 0。
-    parameter integer ARM_DELAY  = 8
+    parameter integer ARM_DELAY  = 8,
+    parameter integer CAP_FILTER = 0,    // reject internal fragments; confirm new tracks
+    parameter integer BOX_PAD    = 4     // restore a small denoise border (pixels)
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -148,6 +150,7 @@ module target_assoc #(
     //    vx/vy = 速度估计（有符号，px/帧）
     //==================================================================
     reg [4*1 -1:0]  R_tv;       // 有效
+    reg [3:0] R_confirm;
     reg [4*2 -1:0]  R_tcls;     // 类别
     reg [4*11-1:0]  R_tcx;      // 平滑质心 x（画框用）
     reg [4*10-1:0]  R_tcy;      // 平滑质心 y（画框用）
@@ -201,6 +204,22 @@ module target_assoc #(
     wire [9:0]  W_in_ymin  = W_slot[B_YMIN +: 10];
     wire [9:0]  W_in_ymax  = W_slot[B_YMAX +: 10];
     wire [19:0] W_in_area  = W_slot[B_AREA +: 20];
+
+    // A small island inside a same-color track is not a new object.
+    reg P_fragment;
+    reg Q_fragment;
+    integer fi;
+    always @* begin
+        P_fragment = 1'b0;
+        for (fi=0; fi<4; fi=fi+1) begin
+            if (R_tv[fi] && S_taken[fi] && W_in_cls == R_tcls[fi*2 +: 2] &&
+                W_in_xmin >= R_txmin[fi*11 +: 11] && W_in_xmax <= R_txmax[fi*11 +: 11] &&
+                W_in_ymin >= R_tymin[fi*10 +: 10] && W_in_ymax <= R_tymax[fi*10 +: 10] &&
+                W_in_area < (R_tarea[fi*20 +: 20] >> 2)) P_fragment = 1'b1;
+        end
+    end
+    wire W_size_ok = (W_in_xmax >= W_in_xmin + 12'd3) &&
+                     (W_in_ymax >= W_in_ymin + 11'd3);
 
     //==================================================================
     // 5. ★ 最近邻搜索 —— 三级流水（2026-10-15 加，解 Setup −6.9ns）
@@ -288,7 +307,9 @@ module target_assoc #(
                     C_d = W_in_area - R_tarea[mi*W_ARW +: W_ARW];
                 else
                     C_d = R_tarea[mi*W_ARW +: W_ARW] - W_in_area;
-                C_cost = C_cost + C_d[19:AREA_SHIFT];
+                // Cap area penalty: approaching the camera changes area quickly,
+                // even when the same object's center remains stationary.
+                C_cost = C_cost + ((CAP_FILTER && C_d[19:AREA_SHIFT] > 32) ? 13'd32 : C_d[19:AREA_SHIFT]);
                 // ---- + 类别惩罚 ----
                 if (W_in_cls != R_tcls[mi*2 +: 2])
                     C_cost = C_cost + CLS_PEN[12:0];
@@ -366,7 +387,7 @@ module target_assoc #(
     reg        Q_callgate;             //                     新目标门控（第 2 拍寄存）
 
     wire [95:0] W_qslot = Q_slot;      // 第 2/3 拍使用的输入槽（已锁存）
-    wire        Q_in_valid = W_qslot[B_VALID];
+    wire        Q_in_valid = W_qslot[B_VALID] && (!CAP_FILTER || !Q_fragment);
     wire [1:0]  Q_in_cls   = W_qslot[B_CLS  +: 2];
     wire [10:0] Q_in_cx    = W_qslot[B_CX   +: 11];
     wire [9:0]  Q_in_cy    = W_qslot[B_CY   +: 10];
@@ -435,11 +456,22 @@ module target_assoc #(
     // 新目标时直接取输入值（无历史可平滑）
     wire [10:0] C_new_cx  = W_qmatch ? (W_up_cx  ? W_ncx [10:0] : R_tcx  [Q_cbj*W_CXW +: W_CXW]) : Q_in_cx;
     wire [9:0]  C_new_cy  = W_qmatch ? (W_up_cy  ? W_ncy [9:0]  : R_tcy  [Q_cbj*W_CYW +: W_CYW]) : Q_in_cy;
-    wire [10:0] C_new_xmn = W_qmatch ? (W_up_xmn ? W_nxmn[10:0] : R_txmin[Q_cbj*W_CXW +: W_CXW]) : Q_in_xmin;
-    wire [10:0] C_new_xmx = W_qmatch ? (W_up_xmx ? W_nxmx[10:0] : R_txmax[Q_cbj*W_CXW +: W_CXW]) : Q_in_xmax;
-    wire [9:0]  C_new_ymn = W_qmatch ? (W_up_ymn ? W_nymn[9:0]  : R_tymin[Q_cbj*W_CYW +: W_CYW]) : Q_in_ymin;
-    wire [9:0]  C_new_ymx = W_qmatch ? (W_up_ymx ? W_nymx[9:0]  : R_tymax[Q_cbj*W_CYW +: W_CYW]) : Q_in_ymax;
+    wire [10:0] C_new_xmn = (CAP_FILTER && W_qmatch && Q_in_xmin < R_txmin[Q_cbj*11 +: 11]) ? Q_in_xmin : W_qmatch ? (W_up_xmn ? W_nxmn[10:0] : R_txmin[Q_cbj*W_CXW +: W_CXW]) : Q_in_xmin;
+    wire [10:0] C_new_xmx = (CAP_FILTER && W_qmatch && Q_in_xmax > R_txmax[Q_cbj*11 +: 11]) ? Q_in_xmax : W_qmatch ? (W_up_xmx ? W_nxmx[10:0] : R_txmax[Q_cbj*W_CXW +: W_CXW]) : Q_in_xmax;
+    wire [9:0]  C_new_ymn = (CAP_FILTER && W_qmatch && Q_in_ymin < R_tymin[Q_cbj*10 +: 10]) ? Q_in_ymin : W_qmatch ? (W_up_ymn ? W_nymn[9:0]  : R_tymin[Q_cbj*W_CYW +: W_CYW]) : Q_in_ymin;
+    wire [9:0]  C_new_ymx = (CAP_FILTER && W_qmatch && Q_in_ymax > R_tymax[Q_cbj*10 +: 10]) ? Q_in_ymax : W_qmatch ? (W_up_ymx ? W_nymx[9:0]  : R_tymax[Q_cbj*W_CYW +: W_CYW]) : Q_in_ymax;
     wire [19:0] C_new_ar  = W_qmatch ? (W_up_ar  ? W_nar [19:0] : R_tarea[Q_cbj*W_ARW +: W_ARW]) : Q_in_area;
+
+    wire [3:0] W_visible = R_tv & (CAP_FILTER ? R_confirm : 4'hf);
+    function [10:0] pad_lo;
+        input [10:0] value;
+        begin pad_lo = (value > BOX_PAD) ? value - BOX_PAD : 11'd0; end
+    endfunction
+    function [10:0] pad_hi;
+        input [10:0] value;
+        input [10:0] limit;
+        begin pad_hi = (value >= limit - BOX_PAD) ? limit : value + BOX_PAD; end
+    endfunction
 
     //==================================================================
     // 7. 主状态机（每帧一次）
@@ -450,6 +482,8 @@ module target_assoc #(
             S_i      <= 3'd0;
             S_taken  <= 4'd0;
             R_tv     <= {4*1 {1'b0}};
+            R_confirm <= 4'd0;
+            Q_fragment <= 1'b0;
             R_tcls   <= {4*2 {1'b0}};
             R_tcx    <= {4*11{1'b0}};
             R_tcy    <= {4*10{1'b0}};
@@ -509,6 +543,7 @@ module target_assoc #(
             //----------------------------------------------------------
             ST_COST: begin
                 Q_slot <= W_slot;              // 锁存本槽，供 SEL/UPD 两拍使用
+                Q_fragment <= P_fragment || !W_size_ok;
                 Q_cost <= P_cost;              // 4 条轨迹代价打拍（整向量）
                 Q_pv   <= P_valid;             // 有效性/占用性同步打拍
                 Q_pf   <= P_free;
@@ -536,6 +571,7 @@ module target_assoc #(
                     if (W_qmatch) begin
                         // ---- 关联上已有轨迹：速度更新 + EMA + 死区 ----
                         S_taken [Q_cbj]                       <= 1'b1;
+                        R_confirm[Q_cbj] <= 1'b1;
                         R_tmiss [Q_cbj*W_MSW +: W_MSW]        <= 3'd0;
                         R_tcls  [Q_cbj*2 +: 2]                <= Q_in_cls;  // 类别立即跟随
                         R_tpx   [Q_cbj*W_CXW +: W_CXW]        <= Q_in_cx;   // 原始位置
@@ -554,6 +590,7 @@ module target_assoc #(
                         // ---- 新目标：直接落一条空闲轨迹（不平滑，速度清零）----
                         S_taken [C_alloc_j]                   <= 1'b1;
                         R_tv    [C_alloc_j]                   <= 1'b1;
+                        R_confirm[C_alloc_j] <= 1'b0;
                         R_tmiss [C_alloc_j*W_MSW +: W_MSW]    <= 3'd0;
                         R_tcls  [C_alloc_j*2 +: 2]            <= Q_in_cls;
                         R_tpx   [C_alloc_j*W_CXW +: W_CXW]    <= Q_in_cx;
@@ -582,19 +619,19 @@ module target_assoc #(
             // 未被任何输入目标认领的轨迹：miss++；连续 MAX_MISS 帧 → 删框
             ST_FIN: begin
                 if (R_tv[0] && !S_taken[0]) begin
-                    if (R_tmiss[0*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[0] <= 1'b0;
+                    if ((CAP_FILTER && !R_confirm[0]) || R_tmiss[0*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[0] <= 1'b0;
                     else R_tmiss[0*W_MSW +: W_MSW] <= R_tmiss[0*W_MSW +: W_MSW] + 3'd1;
                 end
                 if (R_tv[1] && !S_taken[1]) begin
-                    if (R_tmiss[1*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[1] <= 1'b0;
+                    if ((CAP_FILTER && !R_confirm[1]) || R_tmiss[1*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[1] <= 1'b0;
                     else R_tmiss[1*W_MSW +: W_MSW] <= R_tmiss[1*W_MSW +: W_MSW] + 3'd1;
                 end
                 if (R_tv[2] && !S_taken[2]) begin
-                    if (R_tmiss[2*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[2] <= 1'b0;
+                    if ((CAP_FILTER && !R_confirm[2]) || R_tmiss[2*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[2] <= 1'b0;
                     else R_tmiss[2*W_MSW +: W_MSW] <= R_tmiss[2*W_MSW +: W_MSW] + 3'd1;
                 end
                 if (R_tv[3] && !S_taken[3]) begin
-                    if (R_tmiss[3*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[3] <= 1'b0;
+                    if ((CAP_FILTER && !R_confirm[3]) || R_tmiss[3*W_MSW +: W_MSW] + 3'd1 >= MISS_LIM) R_tv[3] <= 1'b0;
                     else R_tmiss[3*W_MSW +: W_MSW] <= R_tmiss[3*W_MSW +: W_MSW] + 3'd1;
                 end
                 S_st <= ST_OUT;
@@ -603,30 +640,30 @@ module target_assoc #(
             //----------------------------------------------------------
             // 工作区 → 输出寄存器（原子更新，帧内不再抖动）
             ST_OUT: begin
-                O_box_valid[0]         <= R_tv[0];
-                O_box_valid[1]         <= R_tv[1];
-                O_box_valid[2]         <= R_tv[2];
-                O_box_valid[3]         <= R_tv[3];
+                O_box_valid[0]         <= W_visible[0];
+                O_box_valid[1]         <= W_visible[1];
+                O_box_valid[2]         <= W_visible[2];
+                O_box_valid[3]         <= W_visible[3];
                 O_box_cls  [0*2  +: 2] <= R_tcls  [0*2  +: 2];
                 O_box_cls  [1*2  +: 2] <= R_tcls  [1*2  +: 2];
                 O_box_cls  [2*2  +: 2] <= R_tcls  [2*2  +: 2];
                 O_box_cls  [3*2  +: 2] <= R_tcls  [3*2  +: 2];
-                O_box_xmin [0*11 +: 11]<= R_txmin [0*11 +: 11];
-                O_box_xmin [1*11 +: 11]<= R_txmin [1*11 +: 11];
-                O_box_xmin [2*11 +: 11]<= R_txmin [2*11 +: 11];
-                O_box_xmin [3*11 +: 11]<= R_txmin [3*11 +: 11];
-                O_box_xmax [0*11 +: 11]<= R_txmax [0*11 +: 11];
-                O_box_xmax [1*11 +: 11]<= R_txmax [1*11 +: 11];
-                O_box_xmax [2*11 +: 11]<= R_txmax [2*11 +: 11];
-                O_box_xmax [3*11 +: 11]<= R_txmax [3*11 +: 11];
-                O_box_ymin [0*10 +: 10]<= R_tymin [0*10 +: 10];
-                O_box_ymin [1*10 +: 10]<= R_tymin [1*10 +: 10];
-                O_box_ymin [2*10 +: 10]<= R_tymin [2*10 +: 10];
-                O_box_ymin [3*10 +: 10]<= R_tymin [3*10 +: 10];
-                O_box_ymax [0*10 +: 10]<= R_tymax [0*10 +: 10];
-                O_box_ymax [1*10 +: 10]<= R_tymax [1*10 +: 10];
-                O_box_ymax [2*10 +: 10]<= R_tymax [2*10 +: 10];
-                O_box_ymax [3*10 +: 10]<= R_tymax [3*10 +: 10];
+                O_box_xmin [0*11 +: 11]<= CAP_FILTER ? pad_lo(R_txmin [0*11 +: 11]) : R_txmin [0*11 +: 11];
+                O_box_xmin [1*11 +: 11]<= CAP_FILTER ? pad_lo(R_txmin [1*11 +: 11]) : R_txmin [1*11 +: 11];
+                O_box_xmin [2*11 +: 11]<= CAP_FILTER ? pad_lo(R_txmin [2*11 +: 11]) : R_txmin [2*11 +: 11];
+                O_box_xmin [3*11 +: 11]<= CAP_FILTER ? pad_lo(R_txmin [3*11 +: 11]) : R_txmin [3*11 +: 11];
+                O_box_xmax [0*11 +: 11]<= CAP_FILTER ? pad_hi(R_txmax [0*11 +: 11], 11'd1279) : R_txmax [0*11 +: 11];
+                O_box_xmax [1*11 +: 11]<= CAP_FILTER ? pad_hi(R_txmax [1*11 +: 11], 11'd1279) : R_txmax [1*11 +: 11];
+                O_box_xmax [2*11 +: 11]<= CAP_FILTER ? pad_hi(R_txmax [2*11 +: 11], 11'd1279) : R_txmax [2*11 +: 11];
+                O_box_xmax [3*11 +: 11]<= CAP_FILTER ? pad_hi(R_txmax [3*11 +: 11], 11'd1279) : R_txmax [3*11 +: 11];
+                O_box_ymin [0*10 +: 10]<= CAP_FILTER ? pad_lo(R_tymin [0*10 +: 10]) : R_tymin [0*10 +: 10];
+                O_box_ymin [1*10 +: 10]<= CAP_FILTER ? pad_lo(R_tymin [1*10 +: 10]) : R_tymin [1*10 +: 10];
+                O_box_ymin [2*10 +: 10]<= CAP_FILTER ? pad_lo(R_tymin [2*10 +: 10]) : R_tymin [2*10 +: 10];
+                O_box_ymin [3*10 +: 10]<= CAP_FILTER ? pad_lo(R_tymin [3*10 +: 10]) : R_tymin [3*10 +: 10];
+                O_box_ymax [0*10 +: 10]<= CAP_FILTER ? pad_hi(R_tymax [0*10 +: 10], 11'd719) : R_tymax [0*10 +: 10];
+                O_box_ymax [1*10 +: 10]<= CAP_FILTER ? pad_hi(R_tymax [1*10 +: 10], 11'd719) : R_tymax [1*10 +: 10];
+                O_box_ymax [2*10 +: 10]<= CAP_FILTER ? pad_hi(R_tymax [2*10 +: 10], 11'd719) : R_tymax [2*10 +: 10];
+                O_box_ymax [3*10 +: 10]<= CAP_FILTER ? pad_hi(R_tymax [3*10 +: 10], 11'd719) : R_tymax [3*10 +: 10];
                 O_box_cx   [0*11 +: 11]<= R_tcx   [0*11 +: 11];
                 O_box_cx   [1*11 +: 11]<= R_tcx   [1*11 +: 11];
                 O_box_cx   [2*11 +: 11]<= R_tcx   [2*11 +: 11];
@@ -635,8 +672,8 @@ module target_assoc #(
                 O_box_cy   [1*10 +: 10]<= R_tcy   [1*10 +: 10];
                 O_box_cy   [2*10 +: 10]<= R_tcy   [2*10 +: 10];
                 O_box_cy   [3*10 +: 10]<= R_tcy   [3*10 +: 10];
-                O_track_cnt <= {2'b00, R_tv[0]} + {2'b00, R_tv[1]} +
-                               {2'b00, R_tv[2]} + {2'b00, R_tv[3]};
+                O_track_cnt <= {2'b00, W_visible[0]} + {2'b00, W_visible[1]} +
+                               {2'b00, W_visible[2]} + {2'b00, W_visible[3]};
                 S_st        <= ST_IDLE;
             end
 
