@@ -897,10 +897,11 @@ u_uial2axis (
 	
 
 // 原厂HD模式直接输出1280x720 RAW10，不再进行FPGA固定窗口裁剪。
-assign S_raw_tdata  = S_axis_tdata;
-assign S_raw_tlast  = S_axis_tlast;
-assign S_raw_tvalid = S_axis_tvalid;
-assign S_raw_tuser  = S_axis_tuser;
+raw_bayer_nr u_raw_bayer_nr(
+    .clk(S_csi_rx_clk),.rst_n(S_rst_n),.I_gain(S_ag),
+    .I_data(S_axis_tdata),.I_valid(S_axis_tvalid),.I_user(S_axis_tuser),.I_last(S_axis_tlast),
+    .O_data(S_raw_tdata),.O_valid(S_raw_tvalid),.O_user(S_raw_tuser),.O_last(S_raw_tlast)
+);
 
 
 //cwc1 cwc1_Inst
