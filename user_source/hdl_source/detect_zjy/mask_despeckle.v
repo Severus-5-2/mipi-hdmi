@@ -87,7 +87,8 @@ module mask_despeckle #(
     parameter integer VER_ROWS = 3,   // 垂直投票看的行数
     parameter integer VER_NEED = 2,   // 至少几行通过才保留
     parameter integer DCH      = 2,   // 公共输出延迟链深度
-    parameter integer ENABLE   = 1    // 0 = 旁路（仅整体延迟，不做去斑）
+    parameter integer ENABLE   = 1,   // 0 = 旁路（仅整体延迟，不做去斑）
+    parameter integer COLOR_CLEAN = 0 // keep filled pixels classified; never emit unknown islands
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -122,10 +123,20 @@ module mask_despeckle #(
     //     de 无效时推 0 —— 行消隐会把窗口自然清空，无需额外复位逻辑
     //=========================================================================
     reg [WID-1:0] S_sr;
+    reg [WID-1:0] S_sr_r, S_sr_g, S_sr_b;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) S_sr <= {WID{1'b0}};
         else        S_sr <= { (I_de ? I_mask : 1'b0), S_sr[WID-1:1] };
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin S_sr_r<=0; S_sr_g<=0; S_sr_b<=0; end
+        else begin
+            S_sr_r<={(I_de && I_mask_r),S_sr_r[WID-1:1]};
+            S_sr_g<={(I_de && I_mask_g),S_sr_g[WID-1:1]};
+            S_sr_b<={(I_de && I_mask_b),S_sr_b[WID-1:1]};
+        end
     end
 
     //=========================================================================
@@ -133,14 +144,24 @@ module mask_despeckle #(
     //     加法树 3~4 级，75 MHz 下裕量充足
     //=========================================================================
     reg [3:0] S_cnt;
+    reg [3:0] S_count_r, S_count_g, S_count_b;
     integer   i;
     always @(*) begin
         S_cnt = 4'd0;
+        S_count_r=0; S_count_g=0; S_count_b=0;
         for (i = 0; i < WID; i = i + 1)
             S_cnt = S_cnt + {3'b0, S_sr[i]};
+        for (i = 0; i < WID; i = i + 1) begin
+            S_count_r=S_count_r+{3'd0,S_sr_r[i]};
+            S_count_g=S_count_g+{3'd0,S_sr_g[i]};
+            S_count_b=S_count_b+{3'd0,S_sr_b[i]};
+        end
     end
 
-    wire W_keep = (S_cnt >= KMIN[3:0]);
+    wire W_keep = COLOR_CLEAN ?
+        ((S_count_r>=KMIN && S_count_r>(WID/2)) ||
+         (S_count_g>=KMIN && S_count_g>(WID/2)) ||
+         (S_count_b>=KMIN && S_count_b>(WID/2))) : (S_cnt>=KMIN[3:0]);
     //  ★ 保险条款：水平窗**几乎全满**（≥WID-1）⇒ 该像素确定处在「成片区域」内部，
     //    无需再看垂直投票，直接放行。
     //    作用：即使行缓存出了任何问题（未推断、地址错、读写语义不符），
@@ -187,6 +208,12 @@ module mask_despeckle #(
     wire [10:0] A_px;
     wire [9:0]  A_py;
 
+    // COLOR_CLEAN: same-class 2-of-3 rows closes a one-row color hole.
+    // Dedicated 3-bit BRAM rows avoid consuming more distributed logic.
+    wire [2:0] C_row1,C_row2;
+    reg [2:0] C_cur1,C_cur2,C_prev1;
+    wire [2:0] C_horizontal={A_mg,A_mb,A_mr};
+    wire [2:0] C_vote=(C_cur2 & C_prev1)|(C_cur2 & C_row2)|(C_prev1 & C_row2);
     wire        K1_raw, K2_raw;
     reg         R_cur1, R_cur2, R_k1;
     reg         R_hs1, R_hs2;          // 「水平窗几乎全满」延 2 拍（保险条款）
@@ -195,6 +222,13 @@ module mask_despeckle #(
     reg [21:0]  R_pre_px;      // 2 拍 × 11bit
     reg [19:0]  R_pre_py;      // 2 拍 × 10bit
 
+    generate if(COLOR_CLEAN) begin:g_color_rows
+        mask_color_line_ram u_color_row1(clk,A_de,A_px,C_horizontal,C_row1);
+        mask_color_line_ram u_color_row2(clk,A_de,A_px,C_row1,C_row2);
+        assign K1_raw=|C_row1;
+        assign K2_raw=|C_row2;
+    end else begin:g_legacy_rows
+        assign C_row1=0;assign C_row2=0;
     line_delay_ram #(
         .IMG_WIDTH ( 1280 ),
         .ADDR_W    ( 11   ),
@@ -220,6 +254,13 @@ module mask_despeckle #(
         .I_data ( K1_raw ),
         .O_data ( K2_raw )
     );
+
+    end endgenerate
+
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin C_cur1<=0;C_cur2<=0;C_prev1<=0;end
+        else begin C_cur1<=C_horizontal;C_cur2<=C_cur1;C_prev1<=C_row1;end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -254,14 +295,14 @@ module mask_despeckle #(
     // Line RAM retains the preceding frame's bottom rows. They are not valid
     // vertical neighbors for rows 0/1 and must not consume CCL labels at frame top.
     wire W_history_valid = (R_pre_py[19:10] >= 10'd2) && R_pre_de[1];
-    wire W_mask_dspk = ENABLE ? (W_history_valid & W_vote_ok & R_cur2) : R_cur2;
+    wire W_mask_dspk = ENABLE ? (W_history_valid & (COLOR_CLEAN ? (|C_vote) : (W_vote_ok & R_cur2))) : R_cur2;
 
     //  ★ 投票结果 / 延后 2 拍的其它信号，就是新的「对齐基准」A2_*
     wire        A2_de = R_pre_de[1];
     wire        A2_fd = R_pre_fd[1];
-    wire        A2_mr = R_pre_mr[1];
-    wire        A2_mg = R_pre_mg[1];
-    wire        A2_mb = R_pre_mb[1];
+    wire        A2_mr = (COLOR_CLEAN && ENABLE) ? C_vote[0] : R_pre_mr[1];
+    wire        A2_mg = (COLOR_CLEAN && ENABLE) ? C_vote[2] : R_pre_mg[1];
+    wire        A2_mb = (COLOR_CLEAN && ENABLE) ? C_vote[1] : R_pre_mb[1];
     wire [10:0] A2_px = R_pre_px[21:11];
     wire [9:0]  A2_py = R_pre_py[19:10];
 
@@ -310,9 +351,17 @@ module mask_despeckle #(
     //  此刻：W_mask_dspk 与 E_*_sr[EQ-1] 是**同一像素**
     assign A_de   = E_de_sr[EQ-1];
     assign A_fd   = E_fd_sr[EQ-1];
-    assign A_mr   = E_mr_sr[EQ-1];
-    assign A_mg   = E_mg_sr[EQ-1];
-    assign A_mb   = E_mb_sr[EQ-1];
+    // W_keep may fill a raw center pixel that originally had no class.
+    // Preserve a known center class; otherwise inherit a strict window
+    // majority. This prevents COLOR_SEPARATE from splitting a filled object
+    // into alternating color/UNKNOWN runs and exhausting the eight labels.
+    wire center_known=E_mr_sr[EQ-1] || E_mg_sr[EQ-1] || E_mb_sr[EQ-1];
+    wire fill_r=(S_count_r>=KMIN) && (S_count_r>(WID/2));
+    wire fill_b=(S_count_b>=KMIN) && (S_count_b>(WID/2));
+    wire fill_g=(S_count_g>=KMIN) && (S_count_g>(WID/2));
+    assign A_mr = COLOR_CLEAN ? fill_r : E_mr_sr[EQ-1];
+    assign A_mg = COLOR_CLEAN ? fill_g : E_mg_sr[EQ-1];
+    assign A_mb = COLOR_CLEAN ? fill_b : E_mb_sr[EQ-1];
     assign A_px   = E_px_sr[EQ-1];
     assign A_py   = E_py_sr[EQ-1];
 
@@ -359,13 +408,27 @@ module mask_despeckle #(
         end
     end
 
-    assign O_mask       = C_mask_sr[DCH-1];
+    wire classified=C_mr_sr[DCH-1] || C_mg_sr[DCH-1] || C_mb_sr[DCH-1];
+    assign O_mask       = C_mask_sr[DCH-1] && (!COLOR_CLEAN || classified);
     assign O_de         = C_de_sr  [DCH-1];
-    assign O_mask_r     = C_mr_sr  [DCH-1];
-    assign O_mask_g     = C_mg_sr  [DCH-1];
-    assign O_mask_b     = C_mb_sr  [DCH-1];
+    assign O_mask_r     = C_mr_sr  [DCH-1] && (!COLOR_CLEAN || O_mask);
+    assign O_mask_g     = C_mg_sr  [DCH-1] && (!COLOR_CLEAN || O_mask);
+    assign O_mask_b     = C_mb_sr  [DCH-1] && (!COLOR_CLEAN || O_mask);
     assign O_frame_done = C_fd_sr  [DCH-1];
     assign O_pix_x      = C_px_sr  [DCH-1];
     assign O_pix_y      = C_py_sr  [DCH-1];
 
+endmodule
+
+// TD HDL guide: ram_style="bram" selects embedded RAM explicitly.
+// Read-before-write and the two existing column alignment cycles are retained.
+module mask_color_line_ram(
+    input wire clk,input wire wen,input wire [10:0] addr,
+    input wire [2:0] din,output reg [2:0] dout
+);
+    (* ram_style="bram" *) reg [2:0] mem[0:1279];
+    always @(posedge clk) begin
+        if(wen) mem[addr]<=din;
+        dout<=mem[addr];
+    end
 endmodule

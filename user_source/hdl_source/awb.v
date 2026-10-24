@@ -141,6 +141,18 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
         end
     end
     reg [9:0] stats_r,stats_g,stats_b;
+    // Broad neutral eligibility (linear RGB). Strongly colored surfaces
+    // must not steer the entire frame's white balance. Four-to-one range
+    // still admits a neutral reference under a pronounced warm/cool cast.
+    wire [9:0] group_min_rg=(stats_r<stats_g)?stats_r:stats_g;
+    wire [9:0] group_min=(group_min_rg<stats_b)?group_min_rg:stats_b;
+    wire [9:0] group_max_rg=(stats_r>stats_g)?stats_r:stats_g;
+    wire [9:0] group_max=(group_max_rg>stats_b)?group_max_rg:stats_b;
+    wire [11:0] group_light={2'b00,stats_r}+{2'b00,stats_g}+{2'b00,stats_b};
+    wire neutral_group=group_light>=12'd48 && {2'b00,group_max}<={group_min,2'b00};
+    reg [8:0] neutral_count;
+    reg [9:0] neutral_r,neutral_g,neutral_b;
+    reg neutral_valid;
     reg stats_valid,stats_nonempty;
     reg [31:0] frame_r,frame_g,frame_b;
     reg gain_start;
@@ -149,22 +161,27 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
             stats_r<=0; stats_g<=0; stats_b<=0; stats_valid<=0;
             sum_r[0]<=1; sum_g[0]<=1; sum_b[0]<=1;
             frame_r<=1; frame_g<=1; frame_b<=1;
-            stats_nonempty<=0; gain_start<=0;
+            stats_nonempty<=0; gain_start<=0;neutral_count<=0;
+            neutral_r<=0;neutral_g<=0;neutral_b<=0;neutral_valid<=0;
         end else begin
             stats_r<=group_r; stats_g<=group_g; stats_b<=group_b;
             stats_valid<=I_tvalid_r0 && group_any && !frame_boundary;
+            // Separate sum -> neutral classification -> accumulation stages.
+            neutral_r<=stats_r;neutral_g<=stats_g;neutral_b<=stats_b;
+            neutral_valid<=stats_valid && neutral_group && !frame_boundary;
             gain_start<=0;
             if (frame_boundary) begin
-                if (stats_nonempty) begin
+                if (stats_nonempty && neutral_count>=256) begin
                     frame_r<=sum_r[0]; frame_g<=sum_g[0]; frame_b<=sum_b[0];
                     gain_start<=1;
                 end
                 sum_r[0]<=1; sum_g[0]<=1; sum_b[0]<=1;
-                stats_nonempty<=0;
-            end else if (stats_valid) begin
-                sum_r[0]<=sum_r[0]+stats_r;
-                sum_g[0]<=sum_g[0]+stats_g;
-                sum_b[0]<=sum_b[0]+stats_b;
+                stats_nonempty<=0;neutral_count<=0;
+            end else if (neutral_valid) begin
+                if(neutral_count<256) neutral_count<=neutral_count+1'b1;
+                sum_r[0]<=sum_r[0]+neutral_r;
+                sum_g[0]<=sum_g[0]+neutral_g;
+                sum_b[0]<=sum_b[0]+neutral_b;
                 stats_nonempty<=1;
             end
         end

@@ -202,6 +202,7 @@ module detect_color_mask #(
     //    逐级可调 8~28（调大更严；调到 0 则退回旧行为）
     //------------------------------------------------------------------
     parameter [7:0] G_AXIS_TH = 8'd14,
+    parameter integer ADAPT_GREEN_AXIS = 0,
 
     //------------------------------------------------------------------
     //  色相比值判据 RATIO10：用整数比较 |a|*10 >= |b|*RATIO10 实现 |a| >= |b|*RATIO/10
@@ -471,6 +472,8 @@ module detect_color_mask #(
     //  ★ 2026-10-15：门限来源二选一 ——
     //    NIGHT_EN=0 → 恒为 parameter MAG_TH（行为与改造前逐位一致）
     //    NIGHT_EN=1 → 用按 AE 帧平均亮度分档算出的 r_mag_th（见本文件末尾的状态机）
+    reg [1:0] r_band;
+    reg [7:0] r_mag_th;
     wire [7:0] w_mag_th = NIGHT_EN ? r_mag_th : MAG_TH;
     wire       w_mag_ok = (w_mag >= {1'b0, w_mag_th});
 
@@ -500,7 +503,15 @@ module detect_color_mask #(
 
     //  绿「双轴门限」：两轴必须各自达到 G_AXIS_TH（见参数区说明）
     //    · G_AXIS_TH=0 时本条件恒真 ⇒ 退回 2026-10-11 的旧绿判据
-    wire w_g_axis_ok = (w_adcb >= G_AXIS_TH) && (w_adcr >= G_AXIS_TH);
+    // Dark-scene magnitude thresholds previously dropped to 12 while each
+    // green axis still needed 14 (effective magnitude >=28). Scale the axis
+    // floor with the same hysteretic exposure band; preserve the normal band.
+    localparam [7:0] G_AXIS_DIM=(G_AXIS_TH>2)?G_AXIS_TH-2:0;
+    localparam [7:0] G_AXIS_DARK=(G_AXIS_TH>4)?G_AXIS_TH-4:0;
+    localparam [7:0] G_AXIS_LOW=(G_AXIS_TH>6)?G_AXIS_TH-6:0;
+    wire [7:0] green_axis_limit=(NIGHT_EN && ADAPT_GREEN_AXIS) ?
+        (r_band==1?G_AXIS_DIM:r_band==2?G_AXIS_DARK:r_band==3?G_AXIS_LOW:G_AXIS_TH) : G_AXIS_TH;
+    wire w_g_axis_ok = (w_adcb >= green_axis_limit) && (w_adcr >= green_axis_limit);
 
     //  自适应判据：方向 + 幅度 + 比值（绿为 方向 + 幅度 + 双轴）
     wire w_ad_r = w_mag_ok && (w_dcr > 9'sd0) && (w_dcb <= 9'sd0) && (w_rcr10 >= w_lim_cb);
@@ -636,8 +647,6 @@ module detect_color_mask #(
     reg        s_tog_d;      // 上一拍 toggle，用于检出跳变沿
     reg        s_edge;       // 跳变沿（单拍）
     reg        s_edge_d;     // 再延 1 拍 → 此刻 I_y_avg 已稳定
-    reg [1:0]  r_band;       // 当前档位 0~3
-    reg [7:0]  r_mag_th;     // 当前档位对应的幅度门限
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

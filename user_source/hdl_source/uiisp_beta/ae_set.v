@@ -88,7 +88,8 @@ parameter [ 7:0]    DEADZONE    = 8'd4;      // 误差死区：|err| 小于此�
 parameter [15:0]    AE_MIN      = 16'd4;     // 曝光下限（手册规定）
 parameter [15:0]    AE_MAX      = 16'd1991;  // 曝光上限（= 2×VTS−9，满帧）
 parameter [15:0]    AG_MIN      = 16'd16;    // 增益控制字下限 = 1x
-parameter [15:0]    AG_MAX      = 16'd207;   // 增益控制字上限
+// 2026-10-24: quality ceiling 55x (199); old 207 is 63x.
+parameter [15:0]    AG_MAX      = 16'd199;   // 增益控制字上限
                                              // ★v6.6：239(126x) → 207(63x)。
                                              //   原因：现场照片定量分析证明屏幕噪点是
                                              //   **共模亮度噪声且 ∝ 增益**（同一相机：明亮

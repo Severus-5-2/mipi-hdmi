@@ -49,6 +49,7 @@ module osd_category #(
     parameter integer X0 = 16,               // 区域左边
     parameter integer Y0 = 16,               // 第一行上边
     parameter integer COLS = 11,             // 每行字符格数（"R:1 B:0 G:2" = 11）
+    parameter integer SHOW_SHAPES = 1,      // 0: color row only; prune shape counters.
     parameter [23:0]  COLOR = 24'hfff200     // 与现有 OSD 文字同色（黄）
 )(
     input  wire        clk,
@@ -67,6 +68,7 @@ module osd_category #(
 
     //---- 输出（相对 I_de 晚 2 拍）----
     output wire        O_hit,
+    output wire [11:0] O_counts,
     output wire [23:0] O_color
 );
 
@@ -89,8 +91,14 @@ module osd_category #(
     localparam integer SW = `TGT_SLOT_W;   // 96
 
     reg [3:0] cnt_red, cnt_blue, cnt_green;
+    assign O_counts={cnt_green,cnt_blue,cnt_red};
     reg [3:0] cnt_sq,  cnt_cir,  cnt_tri;
 
+    // Empty slots must not count as red (CLS_RED is encoded as zero).
+    wire v0=I_bus[`TGT_O_VALID+0*SW];
+    wire v1=I_bus[`TGT_O_VALID+1*SW];
+    wire v2=I_bus[`TGT_O_VALID+2*SW];
+    wire v3=I_bus[`TGT_O_VALID+3*SW];
     // 槽 k 的 cls / shape
     wire [1:0] c0 = I_bus[`TGT_O_CLS + 0*SW +: 2];
     wire [1:0] c1 = I_bus[`TGT_O_CLS + 1*SW +: 2];
@@ -109,12 +117,12 @@ module osd_category #(
             cnt_red <= 4'd0; cnt_blue <= 4'd0; cnt_green <= 4'd0;
             cnt_sq  <= 4'd0; cnt_cir  <= 4'd0; cnt_tri   <= 4'd0;
         end else if (I_frame_done) begin
-            cnt_red   <= (c0 == `CLS_RED)   + (c1 == `CLS_RED)   + (c2 == `CLS_RED)   + (c3 == `CLS_RED);
-            cnt_blue  <= (c0 == `CLS_BLUE)  + (c1 == `CLS_BLUE)  + (c2 == `CLS_BLUE)  + (c3 == `CLS_BLUE);
-            cnt_green <= (c0 == `CLS_GREEN) + (c1 == `CLS_GREEN) + (c2 == `CLS_GREEN) + (c3 == `CLS_GREEN);
-            cnt_sq    <= (s0 == SHP_SQ)     + (s1 == SHP_SQ)     + (s2 == SHP_SQ)     + (s3 == SHP_SQ);
-            cnt_cir   <= (s0 == SHP_CIR)    + (s1 == SHP_CIR)    + (s2 == SHP_CIR)    + (s3 == SHP_CIR);
-            cnt_tri   <= (s0 == SHP_TRI)    + (s1 == SHP_TRI)    + (s2 == SHP_TRI)    + (s3 == SHP_TRI);
+            cnt_red   <= (v0 && c0 == `CLS_RED)   + (v1 && c1 == `CLS_RED)   + (v2 && c2 == `CLS_RED)   + (v3 && c3 == `CLS_RED);
+            cnt_blue  <= (v0 && c0 == `CLS_BLUE)  + (v1 && c1 == `CLS_BLUE)  + (v2 && c2 == `CLS_BLUE)  + (v3 && c3 == `CLS_BLUE);
+            cnt_green <= (v0 && c0 == `CLS_GREEN) + (v1 && c1 == `CLS_GREEN) + (v2 && c2 == `CLS_GREEN) + (v3 && c3 == `CLS_GREEN);
+            cnt_sq    <= (v0 && s0 == SHP_SQ)     + (v1 && s1 == SHP_SQ)     + (v2 && s2 == SHP_SQ)     + (v3 && s3 == SHP_SQ);
+            cnt_cir   <= (v0 && s0 == SHP_CIR)    + (v1 && s1 == SHP_CIR)    + (v2 && s2 == SHP_CIR)    + (v3 && s3 == SHP_CIR);
+            cnt_tri   <= (v0 && s0 == SHP_TRI)    + (v1 && s1 == SHP_TRI)    + (v2 && s2 == SHP_TRI)    + (v3 && s3 == SHP_TRI);
         end
     end
 
@@ -125,6 +133,7 @@ module osd_category #(
     //  起点是 16 的整数倍 ⇒ 字符列号 = x[11:4] - X0/16 （常量减法）
     localparam integer COL0 = X0 / 16;
     localparam integer ROW0 = Y0 / 16;
+    localparam integer ROWS = SHOW_SHAPES ? 2 : 1;
 
     //  ⚠ I_pix_x 只有 11 位（0..1279）⇒ 列号取 [10:4]（7 位，0..79），不能写 [11:4]（越界出 x）
     wire [6:0] col_now = I_pix_x[10:4] - COL0[6:0];   // 当前列号（区域内 0..COLS-1）
@@ -133,7 +142,7 @@ module osd_category #(
     //  区域命中：列在 range、行在 0..1、且在有效像素期
     wire in_area = I_de
                 && (I_pix_x >= X0[10:0]) && (I_pix_x < (X0 + COLS*16))
-                && (I_pix_y >= Y0[9:0])  && (I_pix_y < (Y0 + 32));
+                && (I_pix_y >= Y0[9:0])  && (I_pix_y < (Y0 + ROWS*16));
 
     //-------------------------------------------------------------------------
     //  字符码查找（按列号）
@@ -173,7 +182,7 @@ module osd_category #(
                        (col_now == 7'd10) ? dig_tri : CH_SP;
 
     wire [7:0] ch_sel = (row_now == 6'd0) ? (ch_r0 | ch_r1 | ch_r2)
-                                           : (ch_s0 | ch_s1 | ch_s2);
+                                           : (SHOW_SHAPES ? (ch_s0 | ch_s1 | ch_s2) : CH_SP);
 
     //  第 1 拍：寄存字符码 + 列内像素号 + 行内像素号 + in_area
     reg [3:0] ly_r1;     // 行内像素号 y[3:0]

@@ -41,7 +41,10 @@
 
 module conn_features #(
     parameter integer SLOT_N = `TARGET_MAX,       // 4（降级为单目标检测时可改 1）
-    parameter integer FAIR_COLORS = 0            // preserve the best component of each class
+    parameter integer FAIR_COLORS = 0,
+    parameter integer GROUP_CAPS = 0,
+    parameter integer GROUP_MIN_AREA = 32,
+    parameter integer GROUP_GAP = 16
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -105,9 +108,19 @@ module conn_features #(
         end
     endfunction
 
-    wire [SW-1:0] new_slot = mk_slot(I_cmp_label, I_cmp_cls, I_cmp_area,
-                                     I_cmp_xmin, I_cmp_xmax, I_cmp_cx,
-                                     I_cmp_ymin, I_cmp_ymax, I_cmp_cy);
+    // Geometric center is deliberate in GROUP_CAPS mode. Pixel moments remain
+    // available at the CCL interface, but are not consumed by this configuration.
+    wire [SW-1:0] raw_slot=mk_slot(I_cmp_label,I_cmp_cls,I_cmp_area,
+        I_cmp_xmin,I_cmp_xmax,GROUP_CAPS?11'd0:I_cmp_cx,
+        I_cmp_ymin,I_cmp_ymax,GROUP_CAPS?10'd0:I_cmp_cy);
+    reg [SW-1:0] g_pending,g_probe;
+    reg [2:0] g_state;
+    reg [1:0] g_index;
+    reg [12:0] g_support_needed,g_join_support;
+    reg [20:0] g_join_area;
+    reg g_join_geometry;
+    localparam G_IDLE=0,G_SCAN=1,G_TEST=2,G_CENTER=3,G_INSERT=4,G_REVIEW=5;
+    wire [SW-1:0] new_slot=GROUP_CAPS?g_pending:raw_slot;
 
     // new 是否应排在 cur **之前**（area 降序 → xmin 升序 → label 升序）
     function beat;
@@ -179,7 +192,7 @@ module conn_features #(
     wire missing_color = new_cls != 2'd3 &&
         !((live0 && new_cls == c0) || (live1 && new_cls == c1) ||
           (live2 && new_cls == c2) || (live3 && new_cls == c3));
-    wire fair_accept = (I_cmp_area != 0) && (eligible0 || eligible1 || eligible2 || eligible3) &&
+    wire fair_accept = (new_slot[SF_AREA +: 20] != 0) && (eligible0 || eligible1 || eligible2 || eligible3) &&
                        (missing_color || beat(new_slot, victim_slot));
 
     reg [SW-1:0] fair0, fair1, fair2, fair3;
@@ -212,26 +225,81 @@ module conn_features #(
         endcase
     end
 
+    wire g_join=(g_probe[SF_AREA +: 20]!=0) &&
+        g_probe[SF_CLS +: 2]==g_pending[SF_CLS +: 2] &&
+        {1'b0,g_pending[SF_XMIN +: 11]}<={1'b0,g_probe[SF_XMAX +: 11]}+GROUP_GAP &&
+        {1'b0,g_probe[SF_XMIN +: 11]}<={1'b0,g_pending[SF_XMAX +: 11]}+GROUP_GAP &&
+        {1'b0,g_pending[SF_YMIN +: 10]}<={1'b0,g_probe[SF_YMAX +: 10]}+GROUP_GAP &&
+        {1'b0,g_probe[SF_YMIN +: 10]}<={1'b0,g_pending[SF_YMAX +: 10]}+GROUP_GAP;
+    wire [11:0] g_width={1'b0,g_pending[SF_XMAX +: 11]}-{1'b0,g_pending[SF_XMIN +: 11]}+12'd1;
+    wire [11:0] g_height={2'b00,g_pending[SF_YMAX +: 10]}-{2'b00,g_pending[SF_YMIN +: 10]}+12'd1;
+    wire [10:0] u_xlo=(g_pending[SF_XMIN +: 11]<g_probe[SF_XMIN +: 11])?g_pending[SF_XMIN +: 11]:g_probe[SF_XMIN +: 11];
+    wire [10:0] u_xhi=(g_pending[SF_XMAX +: 11]>g_probe[SF_XMAX +: 11])?g_pending[SF_XMAX +: 11]:g_probe[SF_XMAX +: 11];
+    wire [9:0] u_ylo=(g_pending[SF_YMIN +: 10]<g_probe[SF_YMIN +: 10])?g_pending[SF_YMIN +: 10]:g_probe[SF_YMIN +: 10];
+    wire [9:0] u_yhi=(g_pending[SF_YMAX +: 10]>g_probe[SF_YMAX +: 10])?g_pending[SF_YMAX +: 10]:g_probe[SF_YMAX +: 10];
+    wire [11:0] u_width={1'b0,u_xhi}-{1'b0,u_xlo}+12'd1;
+    wire [11:0] u_height={2'b00,u_yhi}-{2'b00,u_ylo}+12'd1;
+    wire [20:0] g_area={1'b0,g_pending[SF_AREA +: 20]}+{1'b0,g_probe[SF_AREA +: 20]};
+    wire [11:0] g_center_x={1'b0,g_pending[SF_XMIN +: 11]}+{1'b0,g_pending[SF_XMAX +: 11]};
+    wire [10:0] g_center_y={1'b0,g_pending[SF_YMIN +: 10]}+{1'b0,g_pending[SF_YMAX +: 10]};
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            s0 <= {SW{1'b0}}; s1 <= {SW{1'b0}};
-            s2 <= {SW{1'b0}}; s3 <= {SW{1'b0}};
-            l0 <= {SW{1'b0}}; l1 <= {SW{1'b0}};
-            l2 <= {SW{1'b0}}; l3 <= {SW{1'b0}};
-            O_update <= 1'b0;
+        if(!rst_n) begin
+            s0<=0;s1<=0;s2<=0;s3<=0;l0<=0;l1<=0;l2<=0;l3<=0;O_update<=0;
+            g_state<=G_IDLE;g_index<=0;g_pending<=0;g_probe<=0;g_support_needed<=0;g_join_support<=0;g_join_area<=0;g_join_geometry<=0;
         end else begin
-            O_update <= 1'b0;
-            if (I_frame_done) begin
-                // 帧界：锁存本帧擂台 → 输出；随后清空擂台，准备下一帧
-                l0 <= s0; l1 <= s1; l2 <= s2; l3 <= s3;
-                s0 <= {SW{1'b0}}; s1 <= {SW{1'b0}};
-                s2 <= {SW{1'b0}}; s3 <= {SW{1'b0}};
-                O_update <= 1'b1;
-            end else if (I_cmp_valid && (!FAIR_COLORS || fair_accept)) begin
-                s0 <= FAIR_COLORS ? fair0 : n0;
-                s1 <= FAIR_COLORS ? fair1 : n1;
-                s2 <= FAIR_COLORS ? fair2 : n2;
-                s3 <= FAIR_COLORS ? fair3 : n3;
+            O_update<=0;
+            if(I_frame_done) begin
+                l0<=s0;l1<=s1;l2<=s2;l3<=s3;s0<=0;s1<=0;s2<=0;s3<=0;
+                O_update<=1;g_state<=G_IDLE;
+            end else if(GROUP_CAPS) begin
+                case(g_state)
+                G_IDLE: if(I_cmp_valid && I_cmp_cls!=2'd3 && I_cmp_area!=0) begin
+                    g_pending<=raw_slot;g_index<=0;g_state<=G_SCAN;
+                end
+                G_SCAN: begin
+                    case(g_index) 0:g_probe<=s0;1:g_probe<=s1;2:g_probe<=s2;3:g_probe<=s3;endcase
+                    g_state<=G_TEST;
+                end
+                G_TEST: begin
+                    g_join_geometry<=g_join;g_join_area<=g_area;
+                    g_join_support<=({1'b0,u_width}+{1'b0,u_height})<<1;
+                    g_state<=G_REVIEW;
+                end
+                G_REVIEW: begin
+                    if(g_join_geometry && g_join_area>=g_join_support) begin
+                        g_pending[SF_AREA +: 20]<=g_join_area[20]?20'hfffff:g_join_area[19:0];
+                        if(g_probe[SF_XMIN +: 11]<g_pending[SF_XMIN +: 11]) g_pending[SF_XMIN +: 11]<=g_probe[SF_XMIN +: 11];
+                        if(g_probe[SF_XMAX +: 11]>g_pending[SF_XMAX +: 11]) g_pending[SF_XMAX +: 11]<=g_probe[SF_XMAX +: 11];
+                        if(g_probe[SF_YMIN +: 10]<g_pending[SF_YMIN +: 10]) g_pending[SF_YMIN +: 10]<=g_probe[SF_YMIN +: 10];
+                        if(g_probe[SF_YMAX +: 10]>g_pending[SF_YMAX +: 10]) g_pending[SF_YMAX +: 10]<=g_probe[SF_YMAX +: 10];
+                        // Compact remaining sorted candidates; no second register bank.
+                        case(g_index)
+                        0:begin s0<=s1;s1<=s2;s2<=s3;s3<=0;end
+                        1:begin s1<=s2;s2<=s3;s3<=0;end
+                        2:begin s2<=s3;s3<=0;end
+                        3:s3<=0;
+                        endcase
+                        g_index<=0;g_state<=G_SCAN;
+                    end else if(g_index==3) g_state<=G_CENTER;
+                    else begin g_index<=g_index+1'b1;g_state<=G_SCAN;end
+                end
+                G_CENTER: begin
+                    g_support_needed<=({1'b0,g_width}+{1'b0,g_height})<<1;
+                    g_pending[SF_CX +: 11]<=g_center_x[11:1];
+                    g_pending[SF_CY +: 10]<=g_center_y[10:1];g_state<=G_INSERT;
+                end
+                G_INSERT: begin
+                    if(g_pending[SF_AREA +: 20]>=GROUP_MIN_AREA && g_pending[SF_AREA +: 20]>=g_support_needed && (!FAIR_COLORS || fair_accept)) begin
+                        s0<=FAIR_COLORS?fair0:n0;s1<=FAIR_COLORS?fair1:n1;
+                        s2<=FAIR_COLORS?fair2:n2;s3<=FAIR_COLORS?fair3:n3;
+                    end
+                    g_state<=G_IDLE;
+                end
+                default:g_state<=G_IDLE;
+                endcase
+            end else if(I_cmp_valid && (!FAIR_COLORS || fair_accept)) begin
+                s0<=FAIR_COLORS?fair0:n0;s1<=FAIR_COLORS?fair1:n1;
+                s2<=FAIR_COLORS?fair2:n2;s3<=FAIR_COLORS?fair3:n3;
             end
         end
     end

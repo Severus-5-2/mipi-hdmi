@@ -84,6 +84,7 @@ module chroma_denoise #(
     parameter        IMG_WIDTH = 1280,   // 一行像素数，必须与视频时序一致
     parameter        ADDR_W    = 12,     // 列地址位宽
     parameter [1:0]  NR_MODE   = 2'd2,   // 0:旁路  1:仅水平  2:完整3×3
+    parameter        LUMA_NR   = 1'b0, // Median horizontal + edge-limited vertical, no extra row RAM.
     parameter        NR_EN     = 1'b1    // 总开关：1 启用；0 直通
 ) (
     input  wire             clk,         // 像素时钟（S_hdmi_pixel_clk）
@@ -183,6 +184,15 @@ module chroma_denoise #(
     wire [9:0] h_cb_sum = cb_t2 + (cb_t1 << 1) + s1_cb;
     wire [9:0] h_cr_sum = cr_t2 + (cr_t1 << 1) + s1_cr;
 
+    function [7:0] median3;
+        input [7:0] a,b,c;
+        begin
+            median3=(a>b)?((b>c)?b:((a>c)?c:a)):
+                              ((a>c)?a:((b>c)?c:b));
+        end
+    endfunction
+    wire [7:0] h_y_clean=median3(y_t2,y_t1,s1_y);
+
     //========================================================================
     // 级 2 寄存器：打包成 24bit 总线 {Y, Cr, Cb} 供后续行延时使用
     //   亮度 Y 只取中层抽头 y_t1 —— **原样通过、仅承担 1 像素延时**，
@@ -197,16 +207,19 @@ module chroma_denoise #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             h_de   <= 1'b0;
-            h_addr <= {ADDR_W{1'b0}};
             hr_y   <= 8'd0;  hr_cb <= 8'd128;  hr_cr <= 8'd128;
         end else begin
             h_de   <= s1_de;
-            h_addr <= col_cnt;
-            hr_y   <= y_t1;              // 亮度：延时对齐，不滤波
+            hr_y   <= LUMA_NR ? h_y_clean : y_t1;              // 亮度：延时对齐，不滤波
             hr_cb  <= h_cb_sum[9:2];     // 色度：除以 4 完成 [1 2 1] 归一化
             hr_cr  <= h_cr_sum[9:2];
         end
     end
+
+    // Enables reset low, so row address pipelines do not require reset.
+    // Avoid async-reset address FFs: TD otherwise rejects embedded RAM inference.
+    always @(posedge clk) h_addr<=col_cnt;
+    always @(posedge clk) p1_addr<=h_addr;
 
     // h_bus 组合打包（24bit）
     wire [23:0] h_bus = {hr_y, hr_cr, hr_cb};
@@ -217,7 +230,7 @@ module chroma_denoise #(
     wire [23:0] p1_bus;     // 上一行（中心行）
     wire [23:0] p2_bus;     // 上上行
 
-    line_delay_ram #(
+    chroma_line_bram #(
         .IMG_WIDTH (IMG_WIDTH),
         .ADDR_W    (ADDR_W   ),
         .DW        (24       )
@@ -236,14 +249,12 @@ module chroma_denoise #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             p1_de   <= 1'b0;
-            p1_addr <= {ADDR_W{1'b0}};
         end else begin
             p1_de   <= h_de;
-            p1_addr <= h_addr;
         end
     end
 
-    line_delay_ram #(
+    chroma_line_bram #(
         .IMG_WIDTH (IMG_WIDTH),
         .ADDR_W    (ADDR_W   ),
         .DW        (24       )
@@ -270,9 +281,22 @@ module chroma_denoise #(
         end
     end
 
-    wire [7:0] p1_y  = p1_bus[23:16];   // 中心行的亮度（Y 不滤波）
-    wire [7:0] p1_cb = p1_bus[ 7:0 ];
-    wire [7:0] p1_cr = p1_bus[15:8 ];
+    // Two synchronous row reads: delay current/first-row taps one more
+    // cycle so all three taps address the same source column as row2.
+    reg [23:0] p1_aligned;
+    reg [7:0] cur_y_aligned,cur_cb_aligned,cur_cr_aligned;
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin
+            p1_aligned<=24'h008080;
+            cur_y_aligned<=0;cur_cb_aligned<=128;cur_cr_aligned<=128;
+        end else begin
+            p1_aligned<=p1_bus;
+            cur_y_aligned<=cur_y;cur_cb_aligned<=cur_cb;cur_cr_aligned<=cur_cr;
+        end
+    end
+    wire [7:0] p1_y  = (LUMA_NR ? p1_aligned[23:16] : p1_bus[23:16]);   // 中心行的亮度（Y 不滤波）
+    wire [7:0] p1_cb = (LUMA_NR ? p1_aligned[ 7:0 ] : p1_bus[ 7:0 ]);
+    wire [7:0] p1_cr = (LUMA_NR ? p1_aligned[15:8 ] : p1_bus[15:8 ]);
     wire [7:0] p2_cb = p2_bus[ 7:0 ];
     wire [7:0] p2_cr = p2_bus[15:8 ];
 
@@ -280,15 +304,23 @@ module chroma_denoise #(
     // 级 4 组合：垂直 [1 2 1]/4 低通（仅作用于色度）
     //   窗口中心为 p1（上一行），故输出整体上移一行。
     //========================================================================
+    wire [7:0] y_up=p2_bus[23:16];
+    wire [7:0] y_dn=cur_y_aligned;
+    wire [7:0] y_up_delta=(y_up>=p1_y)?y_up-p1_y:p1_y-y_up;
+    wire [7:0] y_dn_delta=(y_dn>=p1_y)?y_dn-p1_y:p1_y-y_dn;
+    // Preserve edges: replace a neighbor by the center when contrast >24.
+    wire [7:0] y_up_safe=(y_up_delta<=24)?y_up:p1_y;
+    wire [7:0] y_dn_safe=(y_dn_delta<=24)?y_dn:p1_y;
+    wire [9:0] y_vertical={2'd0,y_up_safe}+{1'b0,p1_y,1'b0}+{2'd0,y_dn_safe}+10'd2;
     reg [7:0] v_y, v_cb, v_cr;      // NR_MODE 决定来源，故用 reg 在 generate 之外声明
 
     generate
         if (NR_MODE == 2'd2) begin : gen_nr_full
             // 完整 3×3：先水平再垂直（均已各自归一化）
-            wire [9:0] v_cb_w = p2_cb + (p1_cb << 1) + cur_cb;
-            wire [9:0] v_cr_w = p2_cr + (p1_cr << 1) + cur_cr;
+            wire [9:0] v_cb_w = {2'd0,p2_cb} + {1'b0,p1_cb,1'b0} + {2'd0,(LUMA_NR?cur_cb_aligned:cur_cb)};
+            wire [9:0] v_cr_w = {2'd0,p2_cr} + {1'b0,p1_cr,1'b0} + {2'd0,(LUMA_NR?cur_cr_aligned:cur_cr)};
             always @(*) begin
-                v_y  = p1_y;        // 亮度取中心行，不滤波
+                v_y  = LUMA_NR ? y_vertical[9:2] : p1_y;        // 亮度取中心行，不滤波
                 v_cb = v_cb_w[9:2]; // 除以 4
                 v_cr = v_cr_w[9:2];
             end
@@ -400,3 +432,19 @@ endmodule
 // · 降噪过度（颜色变淡/边缘溢色）：把 chroma_denoise 的 NR_MODE 改成 1
 //   降低强度，或直接 NR_EN=0 关闭，与未降噪版本对比。
 //============================================================================
+
+// Explicit embedded RAM: the previous generic rows were mapped to LUT RAM.
+// Keep exactly the same synchronous read-before-write interface and latency.
+module chroma_line_bram #(
+    parameter IMG_WIDTH=1280,parameter ADDR_W=12,parameter DW=24
+)(
+    input wire clk,input wire rst_n,input wire I_wen,
+    input wire [ADDR_W-1:0] I_addr,input wire [DW-1:0] I_data,
+    output reg [DW-1:0] O_data
+);
+    (* ram_style="bram" *) reg [DW-1:0] mem[0:IMG_WIDTH-1];
+    always @(posedge clk) begin
+        if(I_wen) mem[I_addr]<=I_data;
+        O_data<=mem[I_addr];
+    end
+endmodule

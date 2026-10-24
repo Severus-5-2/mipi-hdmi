@@ -52,7 +52,12 @@ module conn_label #(
     parameter integer LMIN       = 8,              // 单行游程最小长度（4~16 可调）
     parameter integer CONTINUE_SHORT = 0,          // retain narrow tails of an existing component
     parameter integer COLOR_SEPARATE = 0,          // split runs/components at class boundaries
-    parameter integer RESERVE_COLORS = 0           // keep one unused label for each unseen RGB class
+    parameter integer RESERVE_COLORS = 0,          // keep one unused label for each unseen RGB class
+    parameter integer RECLAIM_SMALL = 0,
+    parameter integer RECLAIM_MIN_AREA = MIN_AREA,
+    parameter integer OUT_SPACING = 0,
+    parameter integer LINK_GAP = 0, // Same-class adjacent-row gap, pixels.
+    parameter integer CCL_CAPACITY = 8 // Default retains legacy footprint; top selects measured budget.
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -89,7 +94,8 @@ module conn_label #(
     output reg  [9:0]  O_cmp_ymin,
     output reg  [9:0]  O_cmp_ymax,
     output reg  [9:0]  O_cmp_cy,
-    output reg  [5:0]  O_cmp_cnt
+    output reg  [5:0]  O_cmp_cnt,
+    output reg         O_capacity_full             // previous frame dropped a run/component for capacity
 );
 
     //=========================================================================
@@ -117,7 +123,8 @@ module conn_label #(
     //         单次布线跑了 20+ 分钟仍未收敛 ⇒ 余量太小、性价比极低。
     //     ⇒ 改为**从源头减少「占名额的连通域」**：新增 `LMIN`（见下），
     //       把「单行游程过短」的噪点直接排除在连通域之外 —— **几乎零成本**，且不动容量。
-    localparam integer NEG = 8;                   // 展开深度（内部连通域上限）
+    // 2026-10-24: geometric-center grouping prunes unused moments; evaluate 16 slots.
+    localparam integer NEG = CCL_CAPACITY;                   // 展开深度（内部连通域上限）
     localparam [LW-1:0] CC_MAX = NEG[LW-1:0];     // 内部 label 分配上限（替代 LBMAX）
 
     //   ★ v7.9 新增「单行游程最小长度门限」`LMIN`（**定义在 module parameter 列表**）：
@@ -347,13 +354,17 @@ module conn_label #(
     wire [LW-1:0] prv_lbl_raw [0:NEG-1];
     wire          ovl_hit_raw [0:NEG-1];
 
+    // Expand the CURRENT interval once, shared by every previous-row entry.
+    // Cached bounds/replay and accumulated object geometry stay unchanged.
+    wire [11:0] ev_link_lo=({1'b0,ev_x0}>=LINK_GAP)?{1'b0,ev_x0}-LINK_GAP:12'd0;
+    wire [11:0] ev_link_hi={1'b0,ev_x1}+LINK_GAP;
     genvar gj;
     generate
         for (gj = 0; gj < NEG; gj = gj + 1) begin : g_ovl
             wire j_valid = (gj < cnt_rd);
             wire hit_raw = j_valid
-                         && (ev_x0 <= rbuf_e[rd_base + gj])
-                         && (ev_x1 >= rbuf_s[rd_base + gj])
+                         && (ev_link_lo <= {1'b0,rbuf_e[rd_base + gj]})
+                         && ({1'b0,rbuf_s[rd_base + gj]} <= ev_link_hi)
                          && (!COLOR_SEPARATE || ev_cls == rbuf_c[rd_base + gj]);
             assign ovl_hit_raw[gj] = hit_raw && ev_valid;
             assign prv_lbl_raw[gj] = hit_raw ? resolve3(rbuf_l[rd_base + gj]) : {LW{1'b0}};
@@ -454,12 +465,17 @@ module conn_label #(
             for (gj = 0; gj < 2; gj = gj + 1)
                 assign l2[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
             assign min_lbl = min2(l2[0], l2[1]);
-        end else if (NEG == 16) begin : g_red16
+        end else if (NEG > 8 && NEG <= 16) begin : g_red16
+            wire [LW-1:0] padded [0:15];
+            for(gj=0;gj<16;gj=gj+1) begin: pad_reduction
+                if(gj<NEG) assign padded[gj]=lv1[gj];
+                else assign padded[gj]={LW{1'b0}};
+            end
             wire [LW-1:0] l8 [0:7];
             wire [LW-1:0] l4 [0:3];
             wire [LW-1:0] l2 [0:1];
             for (gj = 0; gj < 8; gj = gj + 1)
-                assign l8[gj] = min2(lv1[2*gj], lv1[2*gj + 1]);
+                assign l8[gj] = min2(padded[2*gj], padded[2*gj + 1]);
             for (gj = 0; gj < 4; gj = gj + 1)
                 assign l4[gj] = min2(l8[2*gj], l8[2*gj + 1]);
             for (gj = 0; gj < 2; gj = gj + 1)
@@ -475,6 +491,13 @@ module conn_label #(
     //---- 新 label 分配（7 bit 便于判越界）----
     reg [6:0]     lbl_next;
     reg [2:0]     seen_colors;
+    // Keep ONE reclaimed label pending. At most one is reclaimed per row;
+    // this avoids an eight-way free bitmap, priority mux and popcount on the
+    // pixel-event path. Valid components still retain their own labels.
+    reg [LW-1:0] free_label;
+    reg reclaim_fire;
+    reg [LW-1:0] reclaim_label;
+    wire use_recycled=RECLAIM_SMALL && (free_label!=0);
     // Labels remain contiguous for the existing frame summary FSM. Stop
     // allocating extra islands before they consume unseen colors' last slots.
     wire [6:0] reserve_need = RESERVE_COLORS ?
@@ -484,8 +507,11 @@ module conn_label #(
     wire          need_new = (min_lbl == {LW{1'b0}});
     // ★ 面积优化（v1.5.1）：分配上限改为内部深度 CC_MAX(=NEG)，不再用接口宏 LBMAX(=32)。
     //   保证分配出的 label 一定落在 NEG 项数组（eq/cls_lbl/acc_*）的合法下标内。
-    wire          lbl_ok   = !need_new || (lbl_next <= ({1'b0, CC_MAX} - reserve_need));
-    wire [LW-1:0] fresh    = lbl_next[LW-1:0];
+    // Unused labels already cover every unseen color by construction. A
+    // recycled label is additional capacity and cannot spend that reserve.
+    wire          lbl_ok   = !need_new || use_recycled ||
+                             (lbl_next <= ({1'b0,CC_MAX}-reserve_need));
+    wire [LW-1:0] fresh    = use_recycled ? free_label : lbl_next[LW-1:0];
     wire [LW-1:0] lbl_use  = need_new ? fresh : min_lbl;
     // ★ v1.5.2：门控 —— 只要求「事件有效 + label 未溢出」。
     //   （曾试过再加 sec_first 抑制首拍，但那会误杀**同一行的第 2 个及以后的游程**，
@@ -518,7 +544,7 @@ module conn_label #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)            lbl_next <= 7'd1;
         else if (I_frame_done) lbl_next <= 7'd1;
-        else if (ev_ok && need_new && (lbl_next <= {1'b0, CC_MAX}))
+        else if (ev_ok && need_new && !use_recycled && (lbl_next <= {1'b0, CC_MAX}))
             lbl_next <= lbl_next + 7'd1;
     end
 
@@ -548,7 +574,10 @@ module conn_label #(
         end else if (ev_ok) begin
             if (need_new) begin
                 cls_lbl[fresh] <= ev_cls_r;                      // 新 label
-            end else begin
+            end else if(!COLOR_SEPARATE) begin
+                // Separate-color runs only merge with the same birth class;
+                // their root class cannot change. Keep propagation for legacy
+                // mixed-color mode, avoiding a redundant root-read/write chain.
                 // ① 根未定色 → 用本游程色
                 if ((cls_lbl[min_lbl] == 2'b11) && (ev_cls_r != 2'b11))
                     cls_lbl[min_lbl] <= ev_cls_r;
@@ -577,8 +606,74 @@ module conn_label #(
     reg [10:0] acc_xmax [0:NEG];
     reg [9:0]  acc_ymin [0:NEG];
     reg [9:0]  acc_ymax [0:NEG];
+    reg [NEG:0] acc_area_ok, acc_tall;
+    reg [NEG:0] row_seen, recent_row0, recent_row1, recent_row2;
 
     reg        acc_clr;                           // 帧末清零脉冲
+
+    // Inspect one component per blanking clock after the run/stat pipelines
+    // have drained. Reclaim only roots with NO incoming equivalence links,
+    // at least two completely intervening rows, and insufficient area or
+    // height for the existing tracker (height must span at least four rows).
+    // Valid completed objects remain available for the normal frame summary.
+    wire de_fall=I_de_d && !I_de;
+    reg [9:0] last_active_y;
+    reg [3:0] reclaim_delay;
+    reg scan_active;
+    reg [LW-1:0] scan_label;
+    reg scan_child;
+    integer ci;
+    always @* begin
+        scan_child=0;
+        for(ci=1;ci<=NEG;ci=ci+1)
+            if(ci!=scan_label && eq[ci]==scan_label) scan_child=1;
+    end
+    wire scan_recent=recent_row0[scan_label] || recent_row1[scan_label] || recent_row2[scan_label];
+    wire reclaim_candidate=RECLAIM_SMALL && scan_active && !I_de &&
+        scan_label!=0 && scan_label<lbl_next && free_label==0 && !reclaim_fire &&
+        eq[scan_label]==scan_label && !scan_child &&
+        !scan_recent && (!acc_area_ok[scan_label] || !acc_tall[scan_label]);
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin
+            last_active_y<=0; reclaim_delay<=0; scan_active<=0;
+            scan_label<=1; reclaim_fire<=0; reclaim_label<=0;
+        end else begin
+            reclaim_fire<=0;
+            if(I_de) last_active_y<=I_pix_y;
+            if(I_frame_done || !RECLAIM_SMALL) begin
+                reclaim_delay<=0; scan_active<=0;
+            end else if(de_fall && last_active_y!=YLAST) begin
+                reclaim_delay<=8; scan_active<=0;
+            end else if(I_de) begin
+                reclaim_delay<=0; scan_active<=0;
+            end else if(reclaim_delay!=0) begin
+                reclaim_delay<=reclaim_delay-4'd1;
+                if(reclaim_delay==1) begin scan_active<=1; scan_label<=1; end
+            end else if(scan_active) begin
+                reclaim_fire<=reclaim_candidate;
+                reclaim_label<=scan_label;
+                if(reclaim_candidate || scan_label==CC_MAX) scan_active<=0;
+                else scan_label<=scan_label+1'b1;
+            end
+        end
+    end
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) free_label<=0;
+        else if(I_frame_done) free_label<=0;
+        else begin
+            if(reclaim_fire) free_label<=reclaim_label;
+            else if(ev_ok && need_new && use_recycled) free_label<=0;
+        end
+    end
+
+    reg frame_capacity_full;
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin frame_capacity_full<=0; O_capacity_full<=0; end
+        else if(I_frame_done) begin
+            O_capacity_full<=frame_capacity_full; frame_capacity_full<=0;
+        end else if((ev_valid_r && ev_long && need_new && !lbl_ok) ||
+                    (ev_ok && cnt_wr>=CC_MAX)) frame_capacity_full<=1;
+    end
 
     // Separate label selection from accumulator addressing/addition. This breaks
     // the high-fanout prv_lbl -> min_lbl -> accumulator/DSP path.
@@ -588,6 +683,7 @@ module conn_label #(
     reg [20:0] stat_sumx;
     reg [10:0] stat_x0, stat_x1;
     reg [9:0] stat_y;
+    wire [19:0] stat_next_area=acc_area[stat_label]+stat_len;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             stat_valid <= 1'b0;
@@ -603,6 +699,21 @@ module conn_label #(
         end
     end
 
+    // Only five bits per label are needed by the blanking reclaimer. Record
+    // occupancy while the existing run accumulator already owns its address,
+    // rather than adding independent wide read muxes across all statistics.
+    // The eight-clock drain guarantees no run write coincides with row shift.
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin
+            row_seen<=0; recent_row0<=0; recent_row1<=0; recent_row2<=0;
+        end else if(I_frame_done) begin
+            row_seen<=0; recent_row0<=0; recent_row1<=0; recent_row2<=0;
+        end else if(!I_de && reclaim_delay==1) begin
+            recent_row2<=recent_row1; recent_row1<=recent_row0;
+            recent_row0<=row_seen; row_seen<=0;
+        end else if(stat_valid) row_seen[stat_label]<=1;
+    end
+
     integer ai;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -614,6 +725,7 @@ module conn_label #(
                 acc_xmax[ai] <= 11'd0;
                 acc_ymin[ai] <= YINIT;
                 acc_ymax[ai] <= 10'd0;
+                acc_area_ok[ai]<=0; acc_tall[ai]<=0;
             end
         end else if (acc_clr) begin
             for (ai = 0; ai <= NEG; ai = ai + 1) begin
@@ -624,9 +736,19 @@ module conn_label #(
                 acc_xmax[ai] <= 11'd0;
                 acc_ymin[ai] <= YINIT;
                 acc_ymax[ai] <= 10'd0;
+                acc_area_ok[ai]<=0; acc_tall[ai]<=0;
             end
+        end else if (reclaim_fire) begin
+            acc_area[reclaim_label]<=0;
+            acc_sumx[reclaim_label]<=0; acc_sumy[reclaim_label]<=0;
+            acc_xmin[reclaim_label]<=XINIT; acc_xmax[reclaim_label]<=0;
+            acc_ymin[reclaim_label]<=YINIT; acc_ymax[reclaim_label]<=0;
+            acc_area_ok[reclaim_label]<=0; acc_tall[reclaim_label]<=0;
         end else if (stat_valid) begin
-            acc_area[stat_label] <= acc_area[stat_label] + stat_len;
+            acc_area[stat_label] <= stat_next_area;
+            acc_area_ok[stat_label]<=(stat_next_area>=RECLAIM_MIN_AREA);
+            acc_tall[stat_label]<=acc_tall[stat_label] ||
+                ({1'b0,stat_y}>={1'b0,acc_ymin[stat_label]}+11'd3);
             acc_sumx[stat_label] <= acc_sumx[stat_label] + {10'd0, stat_sumx};
             acc_sumy[stat_label] <= acc_sumy[stat_label] + ({10'd0, stat_y} * {12'd0, stat_len});
             if (stat_x0 < acc_xmin[stat_label]) acc_xmin[stat_label] <= stat_x0;
@@ -640,7 +762,6 @@ module conn_label #(
     //  6. 游程写入 + bank 交换 + 帧首复位
     //=========================================================================
     reg [3:0] swap_wait;
-    wire      de_fall = I_de_d && !I_de;
     wire      do_swap = (swap_wait == 4'd1) && !ev_valid_r;
     // ★ v1.5.2：do_swap 的抑制条件随「行间比对轮」整体延后一拍 —— 用 ev_valid_r
     //   （而不是 ev_valid）。因为 ev_valid 那一拍事件还在「被流水寄存」，若此刻
@@ -740,6 +861,8 @@ module conn_label #(
                      S_RSLV = 3'd6;    // ★面积优化：分时解析（替代 33 份 resolve_full 内联）
 
     reg [2:0]    st;
+    localparam integer OUT_WAIT_W=(OUT_SPACING>1)?$clog2(OUT_SPACING):1;
+    reg [OUT_WAIT_W-1:0] out_wait;
     reg [LW-1:0] root  [0:NEG];
     reg [LW-1:0] cmap  [0:NEG];        // 根 → 紧凑编号（0 = 不输出）
     reg [5:0]    rofc  [0:NEG];        // 紧凑编号 → 根
@@ -791,7 +914,7 @@ module conn_label #(
         if (!rst_n) begin
             st          <= S_IDLE;
             acc_clr     <= 1'b0;
-            O_cmp_valid <= 1'b0;
+            O_cmp_valid <= 1'b0; out_wait<=0;
             O_cmp_label <= 6'd0;
             O_cmp_cls   <= 2'b11;
             O_cmp_area  <= 20'd0;
@@ -1010,10 +1133,12 @@ module conn_label #(
             //-------------------------------------------------------------
             // 输出脉冲流
             S_OUT: begin
-                if (fs <= NEG[6:0]) begin
+                if(out_wait!=0) out_wait<=out_wait-1'b1;
+                else if (fs <= NEG[6:0]) begin
                     if ((fs >= 7'd1) && (fs <= {1'b0, O_cmp_cnt}) &&
                         (rofc[fs[5:0]] != 6'd0)) begin
                         O_cmp_valid <= 1'b1;
+                        out_wait<=(OUT_SPACING>1)?OUT_SPACING-1:0;
                         O_cmp_label <= fs[5:0];
                         O_cmp_cls   <= cls_lbl[rofc[fs[5:0]]];
                         O_cmp_area  <= tp_area[rofc[fs[5:0]]];

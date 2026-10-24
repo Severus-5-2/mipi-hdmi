@@ -14,6 +14,7 @@ module design_top_wrapper (
     inout wire [1:0]  I_button,    // 板载轻触按键，低有效：[0]=KEY1(D5)=减，[1]=KEY2(A9)=增
     input             I_sw1,   // 拨码开关SW1（A4），拨上=0，拨下=1（实测确认）
     input             I_sw2,   // 拨码开关SW2（B4），拨上=0，拨下=1（实测确认）
+    input             I_sw4,   // SW4(D11): high=three-color + red/blue motion; low=zone alarm
 
 
     output wire       O_screen_pwm,
@@ -282,8 +283,8 @@ module design_top_wrapper (
     //==================================================================
     //  ★ 2026-10-14 合板：张铭晨 D5/D7/D8 接入（两边功能并到一起，交接版）
     //    D5 target_assoc  ：目标关联（EMA 平滑 + 漏检保持）→ 把"逐帧跳动的清单"变"稳定的框"
-    //    D7 motion_detect ：帧差法运动检测（降采样 1/4 + 块判决）
-    //    D8 osd_motion_cnt：屏幕显示 "MOTION: N"
+    //    D7 motion_event_monitor：共享帧差缓存，区域告警与红蓝动静状态
+    //    D8 motion_event_osd：警戒区边界、事件次数与颜色状态文字
     //    ★ 注意：S_box_* 的**驱动源已从"总线直接展开"改为 target_assoc 的跟踪输出**
     //      —— 这才是 D5 的意义所在（否则跟踪模块等于没接）。
     //==================================================================
@@ -292,14 +293,40 @@ module design_top_wrapper (
     wire [39:0] S_trk_cy;
     wire [2:0]  S_track_cnt;                // 当前在跟的目标数
 
-    wire [3:0]  S_mot_valid;                // motion_detect：运动区域框（4 槽）
-    wire [43:0] S_mot_xmin, S_mot_xmax;
-    wire [39:0] S_mot_ymin, S_mot_ymax;
-    wire [2:0]  S_mot_cnt;                  // 运动区域数（0~4）
-    wire        S_mot_pix, S_mot_pix_v;     // 运动像素（本版未用，留 ILA 调试）
-    wire [7:0]  S_act_blk;                  // 上一帧活动块数
-    wire        S_mcnt_hit;                 // "MOTION: N" 计数 OSD 命中
-    wire [23:0] S_mcnt_color;
+    localparam integer ALARM_X0=320, ALARM_X1=960;
+    localparam integer ALARM_Y0=192, ALARM_Y1=576;
+    wire S_event_alarm, S_event_ready, S_event_hit;
+    wire [7:0] S_event_count;
+    wire [1:0] S_red_motion, S_blue_motion;
+    wire [23:0] S_event_color;
+    wire [11:0] S_roi_activity_bcd;
+    wire S_detection_full;
+    reg [1:0] R_alarm_switch_sync;
+    reg R_alarm_switch_stable;
+    reg R_color_mode; // Debounced SW4 level, committed only at a frame boundary.
+    // Seven empty lists exceed the tracker's fixed MAX_MISS=5. Reentering
+    // color mode always expires every old track before admitting detections.
+    reg [2:0] R_tracking_flush;
+    wire S_color_tracking_active=R_color_mode && (R_tracking_flush==0);
+    wire [3:0] S_color_box_valid=S_box_valid & {4{S_color_tracking_active}};
+    wire [`TGT_BUS_W-1:0] S_tracking_bus;
+    wire [`TGT_BUS_W-1:0] S_count_bus;
+    wire [11:0] S_color_counts;
+    genvar count_slot;
+    generate for(count_slot=0;count_slot<4;count_slot=count_slot+1) begin: stable_color_counts
+        assign S_count_bus[count_slot*`TGT_SLOT_W +: `TGT_SLOT_W]=
+            {{(`TGT_SLOT_W-3){1'b0}},S_box_cls[count_slot*2 +: 2],S_color_box_valid[count_slot]};
+    end endgenerate
+
+    genvar color_slot;
+    generate for(color_slot=0;color_slot<`TARGET_MAX;color_slot=color_slot+1) begin: g_color_mode_valid
+        // Gate only valid, never the 95 payload bits in each target slot.
+        assign S_tracking_bus[color_slot*`TGT_SLOT_W +: `TGT_SLOT_W]=
+            {S_target_bus[color_slot*`TGT_SLOT_W+1 +: `TGT_SLOT_W-1],
+             S_target_bus[color_slot*`TGT_SLOT_W] && S_color_tracking_active};
+    end endgenerate
+    reg [19:0] R_alarm_switch_debounce;
+    wire S_function_change=S_det_fdone && (R_color_mode!=R_alarm_switch_stable);
 
     //===== 自动曝光 AE 测光信号 =====
     wire [7:0]  S_ae_y_avg;        // 帧平均亮度（74.25MHz 域，更新后保持整帧）
@@ -563,15 +590,22 @@ module design_top_wrapper (
     //          → 噪点被平滑，但边缘/纹理不会糊（人眼对色度分辨率本就低）
     //    资源：2 个行延时 BRAM；流水线设计（单级≤4 级逻辑），时序宽松
     //    延时：垂直上移 1 行 + 水平右移 1 像素，肉眼不可察；仅作用于彩色通路
+    // gamma_lut registers RGB once; match its valid enable at the row RAM input.
+    reg R_gamma_de;
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) R_gamma_de<=1'b0;
+        else R_gamma_de<=S_hdmi_de;
+    end
     chroma_denoise #(
         .IMG_WIDTH (1280  ),   // 必须与视频时序的行像素数一致，否则行缓存会错位
         .ADDR_W    (12    ),
-        .NR_MODE   (2     ),   // 2:完整3×3；1:仅水平（不占BRAM）；0:旁路
+        .NR_MODE   (2     ),
+        .LUMA_NR   (1     ),   // 2:完整3×3；1:仅水平（不占BRAM）；0:旁路
         .NR_EN     (1     )    // 1:启用；0:直通（A/B 对比用）
     ) u_chroma_denoise(
         .clk    (S_hdmi_pixel_clk),
         .rst_n  (S_hdmi_rst_n),
-        .I_de   (S_hdmi_de),        // 必须与 rgb_in 同一拍对齐
+        .I_de   (R_gamma_de),       // Matches registered gamma RGB
         .rgb_in (S_video_bright),
         .rgb_out(S_video_dn)
     );
@@ -602,7 +636,7 @@ module design_top_wrapper (
         //   Cb/Cr 的比值判据失效、判不出颜色 ⇒ 掩膜没了。蓝色因色度幅度小反而正常。
         //   ⇒ 结论：1.75x 是这台相机/这个场景的合理上限，不要再往上抬。
         .SAT_GAIN (9'd112),   // 色度增益，6位小数定点：64=1.0x 96=1.5x 112=1.75x 128=2.0x
-        .DEADZONE (5'd3  )    // 色度死区：|C-Y|≤该值视为灰色不增强（抑制彩色噪点），0=关闭
+        .DEADZONE (5'd6  )    // 色度死区：|C-Y|≤该值视为灰色不增强（抑制彩色噪点），0=关闭
     ) u_sat_enhance(
         .clk    (S_hdmi_pixel_clk),
         .rst_n  (S_hdmi_rst_n),
@@ -1095,7 +1129,7 @@ isp_top u_isp_top (
         .I_de        ( S_hdmi_de        ),
         .I_pix_x     ( S_pix_x          ),
         .I_pix_y     ( S_pix_y          ),
-        .I_box_valid ( S_box_valid      ),   // ← conn_features 目标总线（4 槽展开）
+        .I_box_valid ( S_color_box_valid ),   // ← conn_features 目标总线（4 槽展开）
         .I_box_cls   ( S_box_cls        ),   // ← 每槽 2bit 颜色类别
         .I_box_xmin  ( S_box_xmin       ),
         .I_box_xmax  ( S_box_xmax       ),
@@ -1135,18 +1169,9 @@ isp_top u_isp_top (
     //    ⚠ OSD 只读目标总线（整帧锁存），**不参与数据通路**；
     //      与 box_draw / osd_coord 一样工作在**视频像素域**（S_hdmi_de + S_pix_x/y）。
     //==================================================================
-    shape_class #(
-        .N_SLOT ( 4 )
-    )u_shape_class(
-        .clk          ( S_hdmi_pixel_clk ),
-        .rst_n        ( S_hdmi_rst_n     ),
-        .I_bus        ( S_target_bus     ),
-        // ★ 2026-10-14：改接 S_det_fdone（与总线锁存同源）——
-        //   本模块是"多拍逐槽取数"（4 拍/槽，取数点在 1/5/9/13 拍），
-        //   是**本链唯一**会被"中间地带"串帧的消费者，必须与总线锁存同源。
-        .I_frame_done ( S_det_fdone      ),
-        .O_shapes     ( S_shapes         )
-    );
+    // 2026-10-24: omit S/C/T classification to relieve FPGA congestion.
+    // Keep color counts, target tracking, coordinates and both motion modes.
+    assign S_shapes = 8'hff; // Every slot is unknown; no classifier hardware.
 
     osd_category #(
         // ★ 2026-10-15 下板反馈：原来放 (16,16) 会与**左上角的常驻 Logo** 叠在一起
@@ -1154,6 +1179,7 @@ isp_top u_isp_top (
         //     x 起 = 1280 − 11×16 − 16 = 1088；两行 y = 656 / 672（底边留 16 px）
         .X0 ( 1088 ),              // 区域左上角（16 的整数倍 ⇒ 零除法）
         .Y0 ( 656 ),
+        .SHOW_SHAPES ( 0 ),         // Preserve R/B/G counts; omit S/C/T row.
         .COLS ( 11 )               // "R:1 B:2 G:1" = 11 个字符格
     )u_osd_category(
         .clk          ( S_hdmi_pixel_clk ),
@@ -1161,13 +1187,14 @@ isp_top u_isp_top (
         .I_de         ( S_hdmi_de        ),
         .I_pix_x      ( S_pix_x          ),
         .I_pix_y      ( S_pix_y          ),
-        .I_bus        ( S_target_bus     ),
+        .I_bus        ( S_count_bus      ),
         .I_shapes     ( S_shapes         ),
-        .I_valid_cnt  ( S_target_cnt     ),
+        .I_valid_cnt  ( S_track_cnt      ),
         // ★ 2026-10-14：改接 S_det_fdone（保持三处同源，省得再分辨"哪个要改"）。
         //   注：本模块在单时钟沿内组合读完 4 槽（单拍取数）⇒ 本不受"中间地带"影响，
         //   只是让它与总线锁存对齐、结果更直观（滞后 0 帧而非 1 帧）。
         .I_frame_done ( S_det_fdone      ),
+        .O_counts     ( S_color_counts   ),
         .O_hit        ( S_cat_hit        ),
         .O_color      ( S_cat_color      )
     );
@@ -1176,17 +1203,16 @@ isp_top u_isp_top (
     //  ★张铭晨 D5/D7/D8（2026-10-14 合板接入：两边功能并到一起）
     //    D5 target_assoc  → 跟踪稳定化：从 S_target_bus 产生"稳定的框"
     //        输出**直接驱动 S_box_***（原"总线逐槽展开"那一段已改为接它）
-    //    D7 motion_detect → 帧差法运动检测（降采样 1/4 + 块判决）
-    //    D8 osd_motion_cnt→ 屏幕显示 "MOTION: N"
+    //    D7/D8 → 区域运动告警、红蓝动静统计及只读显示
     //    ⚠ 三者的 I_frame_done 全部接 S_det_fdone（与总线锁存同源 ⇒ 早 0 拍，
     //      绝不会落进冻结表 §1.1 说的"中间地带"）
     //==================================================================
-    target_assoc #(.CAP_FILTER(1)) u_target_assoc (
+    target_assoc #(.CAP_FILTER(1), .MAX_MISS(5), .EMA_SHIFT(1), .MATCH_TH(144), .CLS_PEN(256)) u_target_assoc (
         .I_clk         ( S_hdmi_pixel_clk ),
         .I_rst_n       ( S_hdmi_rst_n     ),
         .I_frame_done  ( S_det_fdone      ),
-        .I_target_cnt  ( S_target_cnt     ),
-        .I_target_bus  ( S_target_bus     ),
+        .I_target_cnt  ( S_color_tracking_active ? S_target_cnt : 3'd0 ),
+        .I_target_bus  ( S_tracking_bus   ),
         .O_box_valid   ( S_box_valid      ),
         .O_box_xmin    ( S_box_xmin       ),
         .O_box_xmax    ( S_box_xmax       ),
@@ -1198,48 +1224,57 @@ isp_top u_isp_top (
         .O_track_cnt   ( S_track_cnt      )
     );
 
-    //---- D7：帧差法运动检测 ----
-    //   ⚠ I_rgb / I_pix_x / I_pix_y / I_de 必须【同拍】⇒ 取 0 延迟的
-    //     S_video_dn + S_pix_x/S_pix_y（与 S_hdmi_de 同拍那一档）。
-    motion_detect u_motion_detect (
-        .I_clk         ( S_hdmi_pixel_clk ),
-        .I_rst_n       ( S_hdmi_rst_n     ),
-        .I_de          ( S_hdmi_de        ),
-        .I_pix_x       ( S_pix_x          ),
-        .I_pix_y       ( S_pix_y          ),
-        .I_rgb         ( S_video_dn       ),
-        .I_frame_done  ( S_det_fdone      ),
-        .O_mot_valid   ( S_mot_valid      ),
-        .O_mot_xmin    ( S_mot_xmin       ),
-        .O_mot_xmax    ( S_mot_xmax       ),
-        .O_mot_ymin    ( S_mot_ymin       ),
-        .O_mot_ymax    ( S_mot_ymax       ),
-        .O_mot_cnt     ( S_mot_cnt        ),
-        .O_mot_pix     ( S_mot_pix        ),
-        .O_mot_pix_v   ( S_mot_pix_v      ),
-        .O_act_blk     ( S_act_blk        )
+    // Shared frame difference: fixed-zone alarm plus per-color status.
+    // Shared grayscale is delayed two clocks (gamma + gray). The new
+    // frontend compensates both. SW4 is synchronized/debounced, then
+    // committed at the frame boundary; inactive decisions are cleared.
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            R_alarm_switch_sync<=0; R_alarm_switch_stable<=0;
+            R_alarm_switch_debounce<=0; R_color_mode<=0; R_tracking_flush<=3'd7;
+        end else begin
+            R_alarm_switch_sync<={R_alarm_switch_sync[0],I_sw4};
+            if(S_det_fdone) begin
+                R_color_mode<=R_alarm_switch_stable;
+                if(!R_alarm_switch_stable || R_color_mode!=R_alarm_switch_stable)
+                    R_tracking_flush<=3'd7;
+                else if(R_tracking_flush!=0) R_tracking_flush<=R_tracking_flush-3'd1;
+            end
+            if(R_alarm_switch_sync[1]==R_alarm_switch_stable) R_alarm_switch_debounce<=0;
+            else if(R_alarm_switch_debounce==20'd749999) begin
+                R_alarm_switch_stable<=R_alarm_switch_sync[1];
+                R_alarm_switch_debounce<=0;
+            end else R_alarm_switch_debounce<=R_alarm_switch_debounce+1'b1;
+        end
+    end
+    motion_event_monitor #(
+        .ROI_X0(ALARM_X0), .ROI_X1(ALARM_X1),
+        .ROI_Y0(ALARM_Y0), .ROI_Y1(ALARM_Y1)
+    )u_motion_event_monitor(
+        .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
+        .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
+        .I_gray(S_gray_out), .I_frame_done(S_det_fdone),
+        .I_color_mode(R_color_mode), .I_mode_change(S_function_change),
+        .I_box_valid(S_color_box_valid), .I_box_cls(S_box_cls),
+        .I_box_xmin(S_box_xmin), .I_box_xmax(S_box_xmax),
+        .I_box_ymin(S_box_ymin), .I_box_ymax(S_box_ymax),
+        .O_alarm(S_event_alarm), .O_ready(S_event_ready),
+        .O_events_bcd(S_event_count),
+        .O_roi_bcd(S_roi_activity_bcd),
+        .O_red_state(S_red_motion), .O_blue_state(S_blue_motion)
     );
-
-    // Motion rectangles removed at the user's request. Only color target
-    // tracking rectangles feed the display; the motion count OSD remains.
-
-    //---- D8："MOTION: N" 计数 OSD ----
-    //   ★ 2026-10-15 下板反馈：原来放 (16,48)（避让我方类别 OSD），但**左上角被常驻 Logo 占着**，
-    //     两组数据都看不清 ⇒ 与 `osd_category` 一起挪到**屏幕右下角**的第三行。
-    //     计算（字符格 16×16、NCHAR=8）：x 起 = 1088（与类别 OSD 左对齐）；y = 688。
-    osd_motion_cnt #(
-        .MC_X0 ( 1088 ),
-        .MC_Y0 ( 688 )
-    )u_osd_motion_cnt(
-        .I_clk        ( S_hdmi_pixel_clk ),
-        .I_rst_n      ( S_hdmi_rst_n     ),
-        .I_de         ( S_hdmi_de        ),
-        .I_pix_x      ( S_pix_x          ),
-        .I_pix_y      ( S_pix_y          ),
-        .I_mot_cnt    ( S_mot_cnt        ),
-        .I_frame_done ( S_det_fdone      ),
-        .O_hit        ( S_mcnt_hit       ),
-        .O_color      ( S_mcnt_color     )
+    motion_event_osd #(
+        .ROI_X0(ALARM_X0), .ROI_X1(ALARM_X1),
+        .ROI_Y0(ALARM_Y0), .ROI_Y1(ALARM_Y1)
+    )u_motion_event_osd(
+        .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
+        .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
+        .I_color_mode(R_color_mode), .I_counts(S_color_counts),
+        .I_alarm(S_event_alarm), .I_ready(S_event_ready),
+        .I_events_bcd(S_event_count),
+        .I_roi_bcd(S_roi_activity_bcd), .I_det_full(S_detection_full),
+        .I_red_state(S_red_motion), .I_blue_state(S_blue_motion),
+        .O_hit(S_event_hit), .O_color(S_event_color)
     );
 
     // ===== 叠加仲裁：坐标数字 > 画框 > 检测掩膜 =====
@@ -1269,6 +1304,7 @@ isp_top u_isp_top (
         .MAG_TH     ( `MAG_TH  ),
         .RATIO10    ( `RATIO10 ),
         .G_AXIS_TH  ( `G_AXIS_TH ),
+        .ADAPT_GREEN_AXIS ( 1 ), // night bands must relax green axis floors as well as total chroma
         // ★ 2026-10-12 血泪教训：这三行原来写的是字面量 `.MAG_TH(8'd16)`
         //   —— 只改了 detect_color_mask.v 的 parameter 默认值，被这里
         //      显式覆盖回 16，**新门限根本没生效**（掩膜仍满屏噪声 →
@@ -1338,7 +1374,8 @@ isp_top u_isp_top (
         .VER_ROWS   ( 3 ),      // 垂直投票看 3 行
         .VER_NEED   ( 2 ),      // 至少 2 行通过才保留
         .DCH        ( 2 ),      // 公共输出延迟链深度
-        .ENABLE     ( 1 )       // 1 = 启用去斑；0 = 旁路（仅延迟）
+        .ENABLE     ( 1 ),      // 1 = 启用去斑；0 = 旁路（仅延迟）
+        .COLOR_CLEAN ( 1 )      // classify filled holes; remove UNKNOWN islands before CCL
     )u_mask_despeckle(
         .clk            ( S_hdmi_pixel_clk ),
         .rst_n          ( S_hdmi_rst_n     ),
@@ -1371,7 +1408,10 @@ isp_top u_isp_top (
         .MIN_AREA   ( `MIN_AREA    ),    // 小面积噪声门限
         .CONTINUE_SHORT ( 1 ),           // preserve narrow connected edges; seed threshold stays 8
         .COLOR_SEPARATE ( 1 ),           // touching red/blue/green objects remain distinct
-        .RESERVE_COLORS ( 1 )            // reserve labels for colors arriving later in raster order
+        .RESERVE_COLORS ( 1 ),           // reserve labels for colors arriving later in raster order
+        .RECLAIM_MIN_AREA ( 32 ),
+        .OUT_SPACING ( 64 ), .CCL_CAPACITY ( 10 ), .LINK_GAP(3),
+        .RECLAIM_SMALL ( 1 )             // free expired tiny/flat leaf regions during line blanking
     )u_conn_label(
         .clk            ( S_hdmi_pixel_clk ),
         .rst_n          ( S_hdmi_rst_n     ),
@@ -1396,11 +1436,13 @@ isp_top u_isp_top (
         .O_cmp_ymin     ( S_cmp_ymin       ),
         .O_cmp_ymax     ( S_cmp_ymax       ),
         .O_cmp_cy       ( S_cmp_cy         ),
-        .O_cmp_cnt      ( S_cmp_cnt        )
+        .O_cmp_cnt      ( S_cmp_cnt        ),
+        .O_capacity_full ( S_detection_full )
     );
 
     conn_features #(
         .SLOT_N ( `TARGET_MAX ),        // 4
+        .GROUP_CAPS ( 1 ), .GROUP_MIN_AREA ( 32 ), .GROUP_GAP ( 16 ),
         .FAIR_COLORS ( 1 )              // retain each color's best component before duplicates
     )u_conn_features(
         .clk               ( S_hdmi_pixel_clk ),
@@ -1446,16 +1488,16 @@ isp_top u_isp_top (
     localparam MASK_OVERLAY_EN = 0;
 
     assign S_mask_color = 24'h00_FF_00;   // 掩膜颜色（绿）
-    //    优先级（高→低）：坐标 OSD > 跟踪框 > 类别 OSD > MOTION 计数 > 掩膜
+    //    优先级（高→低）：坐标 OSD > 跟踪框 > 类别 OSD > 区域与状态提示 > 掩膜
     //    hdmi_mixer 不需要改 —— 所有人共用 S_ovl_hit / S_ovl_color 这一条通道。
-    assign S_ovl_hit    = (MASK_OVERLAY_EN ? S_dspk_mask : 1'b0)
-                        | S_box_hit | S_coord_hit | S_cat_hit
-                        | S_mcnt_hit;
-    assign S_ovl_color  = S_coord_hit     ? S_coord_color    :
-                          S_box_hit       ? S_box_color      :
-                          S_cat_hit       ? S_cat_color      :
-                          S_mcnt_hit      ? S_mcnt_color     :
-                                            S_mask_color;
+    // Select one feature overlay; shared video/AE processing remains continuous.
+    // Inactive histories are cleared; the tracker consumes empty target lists.
+    assign S_ovl_hit = S_event_hit | (R_color_mode &&
+        (S_box_hit | S_coord_hit | S_cat_hit | (MASK_OVERLAY_EN && S_dspk_mask)));
+    assign S_ovl_color = (R_color_mode && S_coord_hit) ? S_coord_color :
+                         (R_color_mode && S_box_hit) ? S_box_color :
+                         (R_color_mode && S_cat_hit) ? S_cat_color :
+                         S_event_hit ? S_event_color : S_mask_color;
 
     hdmi_mixer #(
         .H_OFFSET   ( 0    ),

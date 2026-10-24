@@ -21,6 +21,7 @@ set_pin_assignment	{ O_tmds_clk_p }		{ LOCATION = C17; IOSTANDARD = TMDS33; PULL
 
 set_pin_assignment { I_sw1 } { LOCATION = A4; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 set_pin_assignment { I_sw2 } { LOCATION = B4; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+set_pin_assignment { I_sw4 } { LOCATION = D11; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
 
 
 

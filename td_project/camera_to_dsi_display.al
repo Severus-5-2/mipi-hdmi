@@ -469,6 +469,7 @@
             </File>
             <File Path="../user_source/hdl_source/track_box/rtl/motion_detect.v">
                 <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
@@ -477,10 +478,27 @@
             </File>
             <File Path="../user_source/hdl_source/track_box/rtl/osd_motion_cnt.v">
                 <FileInfo>
+                    <Attr Name="AutoExcluded" Val="true"/>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
                     <Attr Name="BelongTo" Val="design_1"/>
                     <Attr Name="CompileOrder" Val="74"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/track_box/rtl/motion_event_monitor.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="75"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/track_box/rtl/motion_event_osd.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="76"/>
                 </FileInfo>
             </File>
         </Verilog>
