@@ -45,12 +45,11 @@
 //    本模块用 WAIT_FRAMES（默认 3）控制两次调整之间的最小间隔，
 //    即每 4 帧（≈66 ms）最多调整一次，确保上一次调整的画面已经完全稳定。
 //
-//  【按键改为调"目标亮度"的理由】
-//    如果保留旧版"按键直接改增益"，会和自动调节互相打架：
-//    用户按下调亮，AE 下一帧又把它拉回去，表现为按了没反应。
-//    所以改为调 TARGET（靶亮度），本质上是在告诉 AE"我希望画面这么亮"，
-//    既保留了现场交互手感，又不破坏闭环。
-//    参数 AUTO_EN 置 0 可退回旧行为：关闭自动，按键重新直接调增益。
+//  2026-10-25: K1/K2 directly adjust gain after the first single-key action.
+//  Auto exposure remains the power-up default. Manual gain freezes both AE and
+//  AG at the current exposure, so the feedback loop cannot undo button changes.
+//  Hold BOTH keys for about1s to return to auto; release both before new actions.
+//  Single click changes gain code16, long hold repeats code1 at the old tick.
 //=============================================================================
 
 module ae_set
@@ -66,7 +65,8 @@ module ae_set
 
     output wire        O_ae_req,        // 请求写一次曝光/增益
     output wire [15:0] O_ae,            // 曝光值（单位 1/2 行）
-    output wire [15:0] O_ag             // 增益控制字（送 SC520GainTbl 查表）
+    output wire [15:0] O_ag,            // 增益控制字（送 SC520GainTbl 查表）
+    output wire        O_manual_gain    // Read-only OSD status:1=button gain hold
 );
 
 //=============================================================================
@@ -77,13 +77,11 @@ parameter [ 7:0]    TARGET_DEF  = 8'd145;    // 上电默认靶亮度（Gamma �
                                              // v6.3 A项：120→145。120 对应线性域约 18% 灰，
                                              // 显示域偏暗（用户"和手机差距大"）；145 约 30% 灰，
                                              // 接近相机 18% 中灰经 sRGB 显示后的观感亮度。
-parameter [ 7:0]    TARGET_MIN  = 8'd60;     // 靶亮度下调下限
-parameter [ 7:0]    TARGET_MAX  = 8'd200;    // 靶亮度上调上限
-parameter [ 7:0]    BTN_STEP    = 8'd16;     // 单次【按下】的靶亮度变化量
-                                             // ★v6.6：8→16。原来 8 只等于 8/32 octave
-                                             //   =1.19x 增益变化，肉眼几乎看不出 ⇒
-                                             //   现场反馈"按 KEY1 噪点没减弱"。16 是
-                                             //   半档(1.41x)，按 4 下就降 4x 增益/噪声。
+// Legacy target-key parameters retained for source compatibility only.
+// K1/K2 now change gain directly (click16, hold1); target stays TARGET_DEF.
+parameter [ 7:0]    TARGET_MIN  = 8'd60;
+parameter [ 7:0]    TARGET_MAX  = 8'd200;
+parameter [ 7:0]    BTN_STEP    = 8'd16;
 parameter [ 7:0]    DEADZONE    = 8'd4;      // 误差死区：|err| 小于此值不调节（防抖动）
 parameter [15:0]    AE_MIN      = 16'd4;     // 曝光下限（手册规定）
 parameter [15:0]    AE_MAX      = 16'd1991;  // 曝光上限（= 2×VTS−9，满帧）
@@ -103,8 +101,8 @@ parameter [ 3:0]    WAIT_FRAMES = 4'd3;      // 两次调整之间要空等的�
 
 //=============================================================================
 //  定时脉冲生成（沿用原版逻辑）
-//    r_ae_tick：每 1 ms 一个脉冲（24 MHz 下计数 100000）
-//    r_ag_tick：每 32 ms 一个脉冲，用于按键调节的节拍
+//    r_ae_tick：每约4.167ms一个脉冲（24MHz下计数100000）
+//    r_ag_tick：每约133ms一个脉冲，用于长按增益微调
 //=============================================================================
 reg [19:0] rc_ae_tick = 0;
 reg        r_ae_tick  = 0;
@@ -146,13 +144,47 @@ always @(posedge I_clk or posedge I_rst) begin
     end
 end
 
-//  v6：按键手感改造
-//    旧行为：按住期间每 32 ms 才 +1，短按一次只加 2~3 —— 于是"要按很多次"。
-//    新行为：
-//      · 单击（按下沿）→ 直接跳 BTN_STEP(8)，按 3 下就能从 112 拉到 136
-//      · 长按        → 每 32 ms +1 连发，用于精细微调
-wire btn_add_edge = r_button_1[3] && !r_button_2[3];   // KEY2 按下沿（增）
-wire btn_sub_edge = r_button_1[2] && !r_button_2[2];   // KEY1 按下沿（减）
+// Debounce at the existing tick:100000/24MHz ~=4.167ms per sample.
+// Two matching samples, then edge detect in the24MHz domain.
+reg [1:0] key_s0=0,key_s1=0,key_stable=0,key_prev=0;
+reg [7:0] chord_ticks=0;
+reg chord_lock=0;
+reg manual_gain=!AUTO_EN;
+assign O_manual_gain=manual_gain;
+always @(posedge I_clk or posedge I_rst) begin
+    if(I_rst) begin
+        key_s0<=0;key_s1<=0;key_stable<=0;key_prev<=0;
+        chord_ticks<=0;chord_lock<=0;
+    end else begin
+        key_prev<=key_stable;
+        if(r_ae_tick) begin
+            key_s0<=r_button_1[3:2];key_s1<=key_s0;
+            if(key_s0==key_s1) key_stable<=key_s1;
+            if(key_stable==2'b11) begin
+                chord_lock<=1;
+                if(chord_ticks<240) chord_ticks<=chord_ticks+1'b1;
+            end else begin
+                chord_ticks<=0;
+                if(key_stable==0) chord_lock<=0;
+            end
+        end
+    end
+end
+wire btn_add_edge=key_stable[1] && !key_prev[1];
+wire btn_sub_edge=key_stable[0] && !key_prev[0];
+wire return_auto=AUTO_EN && key_stable==2'b11 && r_ae_tick && chord_ticks==239;
+wire key_single=key_stable==2'b01 || key_stable==2'b10;
+// Start repeat only after~300ms held, so a short click is exactly16 codes
+// regardless of the free-running repeat tick phase.
+reg [6:0] hold_ticks=0;
+always @(posedge I_clk or posedge I_rst) begin
+    if(I_rst) hold_ticks<=0;
+    else if(!key_single || chord_lock || btn_add_edge || btn_sub_edge) hold_ticks<=0;
+    else if(r_ae_tick && hold_ticks<72) hold_ticks<=hold_ticks+1'b1;
+end
+wire hold_repeat=hold_ticks==72 && r_ag_tick;
+wire key_adjust=!chord_lock && key_single && (btn_add_edge || btn_sub_edge || hold_repeat);
+wire [15:0] gain_key_step=(btn_add_edge || btn_sub_edge)?16'd16:16'd1;
 
 //=============================================================================
 //  一、跨时钟域接收 ae_meter 的帧信号
@@ -202,7 +234,8 @@ always @(posedge I_clk or posedge I_rst) begin
         warm_cnt <= warm_cnt + 1'b1;
 end
 
-wire ae_ready = AUTO_EN && (warm_cnt >= 3'd4) && I_cam_cfg_done;
+wire ae_ready = AUTO_EN && !manual_gain && key_stable==0 &&
+                (warm_cnt >= 3'd4) && I_cam_cfg_done;
 
 //=============================================================================
 //  三、调整窗口生成（这是防振荡的核心）
@@ -321,78 +354,36 @@ wire [15:0] ef_ag = step_ag;
 //=============================================================================
 //  六、靶亮度寄存器 + 目标值寄存器 + 自动/手动调节
 //=============================================================================
-reg [7:0] t_target = TARGET_DEF;
-
-//  目标值初始值：
-//    曝光拉满 1991 —— 曝光不引入额外噪声，按手册策略应优先给足曝光
-//    增益起点 144 (=16x) —— 从低噪声端起步，由 AE 按需往上加
-//    这样即使开局画面偏暗，AE 也会在几帧内拉到位，而不会一上来就过曝。
+// Automatic mode keeps the established brightness target. Buttons control gain.
+wire [7:0] t_target=TARGET_DEF;
 reg [15:0] r_ae_set = AE_MAX;
 reg [15:0] r_ag_set = 16'd144;
 
 always @(posedge I_clk or posedge I_rst) begin
     if (I_rst) begin
-        t_target <= TARGET_DEF;
-        r_ae_set <= AE_MAX;
-        r_ag_set <= 16'd144;
-
-    //------------------------------------------------------------------
-    //  路径 A：手动调节（按键）
-    //    AUTO_EN=1 时，按键调的是"靶亮度"（告诉 AE 我想要多亮）
-    //    AUTO_EN=0 时，退回旧行为——按键直接调增益
-    //------------------------------------------------------------------
-    end else begin
-        //------------------------------------------------------------------
-        //  路径 A：手动调节（按键）
-        //------------------------------------------------------------------
-        if (AUTO_EN) begin
-            //  自动模式下：按键调"靶亮度"，告诉 AE 我希望画面有多亮
-            //  v6：单击跳一大步（BTN_STEP），长按再按 32ms 节拍连发微调
-            if (btn_add_edge)
-                t_target <= ((TARGET_MAX - t_target) > BTN_STEP)
-                            ? (t_target + BTN_STEP) : TARGET_MAX;
-            else if (btn_sub_edge)
-                t_target <= ((t_target - TARGET_MIN) > BTN_STEP)
-                            ? (t_target - BTN_STEP) : TARGET_MIN;
-            else if (r_button_1[3] && r_ag_tick)          // 长按连发（增）
-                t_target <= (t_target < TARGET_MAX) ? t_target + 1'b1 : t_target;
-            else if (r_button_1[2] && r_ag_tick)          // 长按连发（减）
-                t_target <= (t_target > TARGET_MIN) ? t_target - 1'b1 : t_target;
-
-        end else begin
-            //  手动模式（AUTO_EN=0）：退回旧行为，按键直接调增益
-            if (r_button_1[2]) begin
-                r_ag_set <= (r_ag_set > AG_MIN) ? r_ag_set - r_ag_tick : r_ag_set;
-            end else if (r_button_1[3]) begin
-                r_ag_set <= (r_ag_set < AG_MAX) ? r_ag_set + r_ag_tick : r_ag_set;
-            end
-
-            //  曝光增减分支保留备用（当前板上按键未接这两路）
-            if (r_button_1[0]) begin
-                r_ae_set <= (r_ae_set > AE_MIN) ? r_ae_set - r_ae_tick : r_ae_set;
-            end else if (r_button_1[1]) begin
-                r_ae_set <= (r_ae_set < AE_MAX) ? r_ae_set + r_ae_tick : r_ae_set;
-            end
-        end
-
-        //------------------------------------------------------------------
-        //  路径 B：自动曝光调节
-        //    注意：这段与上一段是并列的，不是 else 关系。
-        //    手动按键与自动回调可以同时生效（按键改靶亮度，AE 照常收敛），
-        //    这正是"按键改调靶亮度"比"按键直接调增益"更合理的原因。
-        //------------------------------------------------------------------
-        if (adjust_win && too_dark) begin
-            if (r_ae_set < AE_MAX) begin
-                r_ae_set <= ((AE_MAX - r_ae_set) > ef_ae) ? (r_ae_set + ef_ae) : AE_MAX;
-            end else if (r_ag_set < AG_MAX) begin
-                r_ag_set <= ((AG_MAX - r_ag_set) > ef_ag) ? (r_ag_set + ef_ag) : AG_MAX;
-            end
-        end else if (adjust_win && too_bright) begin
-            if (r_ag_set > AG_MIN) begin
-                r_ag_set <= ((r_ag_set - AG_MIN) > ef_ag) ? (r_ag_set - ef_ag) : AG_MIN;
-            end else if (r_ae_set > AE_MIN) begin
-                r_ae_set <= ((r_ae_set - AE_MIN) > ef_ae) ? (r_ae_set - ef_ae) : AE_MIN;
-            end
+        manual_gain<=!AUTO_EN;
+        r_ae_set<=AE_MAX;r_ag_set<=16'd144;
+    end else if(return_auto) begin
+        manual_gain<=0;
+    end else if(key_adjust) begin
+        // Manual action takes priority over the AE update window.
+        // Hold current exposure as well as gain; AE cannot compensate it away.
+        manual_gain<=1;
+        if(key_stable[0])
+            r_ag_set<=((r_ag_set-AG_MIN)>gain_key_step)?r_ag_set-gain_key_step:AG_MIN;
+        else
+            r_ag_set<=((AG_MAX-r_ag_set)>gain_key_step)?r_ag_set+gain_key_step:AG_MAX;
+    end else if(!manual_gain && key_stable==0 && adjust_win) begin
+        if(too_dark) begin
+            if(r_ae_set<AE_MAX)
+                r_ae_set<=((AE_MAX-r_ae_set)>ef_ae)?r_ae_set+ef_ae:AE_MAX;
+            else if(r_ag_set<AG_MAX)
+                r_ag_set<=((AG_MAX-r_ag_set)>ef_ag)?r_ag_set+ef_ag:AG_MAX;
+        end else if(too_bright) begin
+            if(r_ag_set>AG_MIN)
+                r_ag_set<=((r_ag_set-AG_MIN)>ef_ag)?r_ag_set-ef_ag:AG_MIN;
+            else if(r_ae_set>AE_MIN)
+                r_ae_set<=((r_ae_set-AE_MIN)>ef_ae)?r_ae_set-ef_ae:AE_MIN;
         end
     end
 end

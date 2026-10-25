@@ -9,6 +9,8 @@ module motion_event_osd #(
     input wire [9:0] I_pix_y,
     input wire I_color_mode,
     input wire [11:0] I_counts,
+    input wire [1:0] I_nr_level,
+    input wire I_gain_manual,
     input wire I_alarm,I_ready,
     input wire [7:0] I_events_bcd,
     input wire [11:0] I_roi_bcd,
@@ -17,6 +19,21 @@ module motion_event_osd #(
     output wire O_hit,
     output wire [23:0] O_color
 );
+    // Slow frame-held MIPI status crosses only into the read-only overlay.
+    // Two synchronizers plus stable-sample/frame-boundary acceptance avoid
+    // a changing NR label during one displayed frame; level3 is invalid.
+    reg [1:0] nr_meta,nr_sync,nr_prev,nr_frame;
+    reg gm_meta,gm_sync,gm_frame;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin nr_meta<=0;nr_sync<=0;nr_prev<=0;nr_frame<=0;gm_meta<=0;gm_sync<=0;gm_frame<=0;end
+        else begin
+            nr_meta<=I_nr_level;nr_sync<=nr_meta;nr_prev<=nr_sync;
+            gm_meta<=I_gain_manual;gm_sync<=gm_meta;
+            if(I_de && I_pix_x==0 && I_pix_y==0) gm_frame<=gm_sync;
+            if(I_de && I_pix_x==0 && I_pix_y==0 && nr_sync==nr_prev && nr_sync!=3)
+                nr_frame<=nr_sync;
+        end
+    end
     function [39:0] state_word;
         input [1:0] state;
         begin
@@ -33,27 +50,29 @@ module motion_event_osd #(
     always @* begin
         if(I_color_mode) begin
             case(I_pix_y[6:4])
-                3'd5:line_text="MODE:COLOR      "; // y=592
+                3'd5:line_text={"MODE:COLOR NR:",(8'h30+{6'd0,nr_frame})," "}; // y=592
                 3'd6:line_text={"RED :",state_word(I_red_state),"      "};
                 3'd7:line_text={"BLUE:",state_word(I_blue_state),"      "};
                 3'd0:line_text={"DET:",(I_det_full?"FULL":"NORM"),"        "};
-                default:line_text={"SW4:1 R",(8'h30+{4'd0,I_counts[3:0]})," B",(8'h30+{4'd0,I_counts[7:4]})," G",(8'h30+{4'd0,I_counts[11:8]}),"  "};
+                3'd1:line_text={"SW4:1 R",(8'h30+{4'd0,I_counts[3:0]})," B",(8'h30+{4'd0,I_counts[7:4]})," G",(8'h30+{4'd0,I_counts[11:8]}),"  "};
+                default:line_text=gm_frame?"GAIN:MANUAL     ":"GAIN:AUTO       ";
             endcase
         end else begin
             case(I_pix_y[6:4])
-                3'd5:line_text="MODE:ALARM      ";
+                3'd5:line_text={"MODE:ALARM NR:",(8'h30+{6'd0,nr_frame})," "};
                 3'd6:line_text={"ZONE:",zone_word," N:",event_tens,event_ones," "};
                 3'd7:line_text={"ACT:",({4'd0,I_roi_bcd[11:8]}+8'h30),
                     ({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),"         "};
                 3'd0:line_text="AUTO:CLEAR      ";
-                default:line_text="SW4:0           ";
+                3'd1:line_text="SW4:0           ";
+                default:line_text=gm_frame?"GAIN:MANUAL     ":"GAIN:AUTO       ";
             endcase
         end
     end
     wire [3:0] col=I_pix_x[7:4]-4'd1;
     wire [7:0] selected_char=line_text[127-{col,3'd0} -:8];
     wire panel=I_de && I_pix_x>=11'd16 && I_pix_x<11'd272 &&
-        I_pix_y>=10'd592 && I_pix_y<10'd672;
+        I_pix_y>=10'd592 && I_pix_y<10'd688;
     // Five by seven glyphs scaled by two, centered in a 16 by 16 cell.
     wire glyph_area=I_pix_x[3:0]>=3 && I_pix_x[3:0]<13 && I_pix_y[3:0]<14;
     wire roi_border=!I_color_mode && I_de && I_pix_x>=ROI_X0 && I_pix_x<ROI_X1 &&

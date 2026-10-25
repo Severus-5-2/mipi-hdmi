@@ -63,6 +63,8 @@ module design_top_wrapper (
 	
 	wire [15:0] 	S_ae;
     wire [15:0] 	S_ag;
+    wire [1:0] S_raw_nr_level;
+    wire S_gain_manual;
     wire 			S_cam_cfg_done;
     wire 			S_ae_cfg_done;
     wire 			S_ae_req; 
@@ -753,7 +755,7 @@ module design_top_wrapper (
 
   
   ae_set #(
-      .AUTO_EN    (1      ),   // 1:自动曝光使能；0:关闭自动（按键恢复直接调增益）
+      .AUTO_EN    (1      ),   // Auto at boot; K1/K2 select manual gain, both held1s returns auto
       .TARGET_DEF (8'd145 ),   // ★v6.4：靶亮度 120→145（120 对应显示域偏暗，用户反馈"和手机差距大"）
                                //   ⚠【易错点】此处显式传参会【覆盖】ae_set 模块内 TARGET_DEF 的默认值，
                                //     改靶亮度时两处必须同步；v6.3 只改了模块默认值(145)而此处仍传 120，
@@ -769,7 +771,7 @@ module design_top_wrapper (
       .I_frame_toggle(S_ae_frame_tog),
       .O_ae_req(S_ae_req),
       .O_ae(S_ae),
-      .O_ag(S_ag)
+      .O_ag(S_ag),.O_manual_gain(S_gain_manual)
   );
   
     // SC520CS原厂真实HD模式：1280x720@60、RAW10、2-Lane、828 Mbps/Lane。
@@ -900,7 +902,8 @@ u_uial2axis (
 raw_bayer_nr u_raw_bayer_nr(
     .clk(S_csi_rx_clk),.rst_n(S_rst_n),.I_gain(S_ag),
     .I_data(S_axis_tdata),.I_valid(S_axis_tvalid),.I_user(S_axis_tuser),.I_last(S_axis_tlast),
-    .O_data(S_raw_tdata),.O_valid(S_raw_tvalid),.O_user(S_raw_tuser),.O_last(S_raw_tlast)
+    .O_data(S_raw_tdata),.O_valid(S_raw_tvalid),.O_user(S_raw_tuser),.O_last(S_raw_tlast),
+    .O_nr_level(S_raw_nr_level)
 );
 
 
@@ -1270,7 +1273,7 @@ isp_top u_isp_top (
     )u_motion_event_osd(
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
-        .I_color_mode(R_color_mode), .I_counts(S_color_counts),
+        .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),.I_gain_manual(S_gain_manual),
         .I_alarm(S_event_alarm), .I_ready(S_event_ready),
         .I_events_bcd(S_event_count),
         .I_roi_bcd(S_roi_activity_bcd), .I_det_full(S_detection_full),

@@ -124,10 +124,12 @@ module raw_bayer_nr #(
 )(
     input wire clk,input wire rst_n,input wire [15:0] I_gain,
     input wire [39:0] I_data,input wire I_valid,I_user,I_last,
-    output reg [39:0] O_data,output reg O_valid,O_user,O_last
+    output reg [39:0] O_data,output reg O_valid,O_user,O_last,
+    output wire [1:0] O_nr_level
 );
     reg [15:0] gain_meta,gain_sync,gain_prev;
     reg [1:0] level;
+    assign O_nr_level=level; // Frame-held actual RAW filter mode, status only.
     reg [8:0] in_x;
     reg [9:0] in_y;
     reg [39:0] mid_word,left_word;
@@ -139,9 +141,9 @@ module raw_bayer_nr #(
         input [15:0] gain_value;input [1:0] previous;
         begin
             case(previous)
-            0:choose_level=(gain_value>=176)?2:(gain_value>=144)?1:0;
-            1:choose_level=(gain_value>=176)?2:(gain_value<=136)?0:1;
-            default:choose_level=(gain_value<=136)?0:(gain_value<=168)?1:2;
+            0:choose_level=(gain_value>=160)?2:(gain_value>=96)?1:0;
+            1:choose_level=(gain_value>=160)?2:(gain_value<=88)?0:1;
+            default:choose_level=(gain_value<=88)?0:(gain_value<=152)?1:2;
             endcase
         end
     endfunction
@@ -254,15 +256,19 @@ module raw_bayer_nr #(
         wire [9:0] r=v_raw[k*10 +:10],f=v_filtered[k*10 +:10];
         wire [9:0] delta=(r>=f)?r-f:f-r;
         wire [10:0] mix={1'b0,r}+{1'b0,f}+11'd1;
-        assign edge_lane[k]=(delta>((v_level==2)?10'd96:10'd48));
+        // Large differences choose HALF filtering, never raw-only veto.
+        // Noise spikes can exceed an edge threshold too.
+        assign edge_lane[k]=(delta>10'd128);
         assign blended[k*10 +:10]=mix[10:1];
     end endgenerate
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin O_data<=0;O_valid<=0;O_user<=0;O_last<=0;end
         else begin
             O_valid<=v_valid;O_user<=v_user && v_valid;O_last<=v_last && v_valid;
-            if(v_level==0 || |edge_lane) O_data<=v_raw;
-            else O_data<=(v_level==2)?v_filtered:blended;
+            // Keep bright bypass exact; all enabled modes retain real averaging.
+            // Whole-word half strength keeps the four CFA lanes consistent.
+            if(v_level==0) O_data<=v_raw;
+            else O_data<=(v_level==2 && !(|edge_lane))?v_filtered:blended;
         end
     end
 endmodule
