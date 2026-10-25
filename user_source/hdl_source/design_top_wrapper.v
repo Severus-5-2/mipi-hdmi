@@ -227,7 +227,7 @@ module design_top_wrapper (
     //===== 张铭晨 track_box：像素坐标 + 画框 + 坐标 OSD（D1）=====
     wire [10:0] S_pix_x, S_pix_x_1d, S_pix_x_2d;
     wire [9:0]  S_pix_y, S_pix_y_1d, S_pix_y_2d;
-    localparam FIELD_METER_DIAG=1'b1; // Temporary white-wall measurement overlay
+    localparam FIELD_METER_DIAG=1'b0; // Temporary white-wall measurement overlay
     wire [359:0] S_field_bcd;
     wire [1:0] S_field_ready;
     wire        S_frame_done;      // 每帧结束脉冲（消隐期计算用）
@@ -606,6 +606,7 @@ module design_top_wrapper (
         .IMG_WIDTH (1280  ),   // 必须与视频时序的行像素数一致，否则行缓存会错位
         .ADDR_W    (12    ),
         .NR_MODE   (2     ),
+        .WIDE_NR   (1     ),   // Five horizontal taps in flat areas; same row RAM/latency
         .LUMA_NR   (1     ),   // 2:完整3×3；1:仅水平（不占BRAM）；0:旁路
         .NR_EN     (1     )    // 1:启用；0:直通（A/B 对比用）
     ) u_chroma_denoise(

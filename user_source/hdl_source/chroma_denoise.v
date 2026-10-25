@@ -1,3 +1,5 @@
+// 2026-10-25: optional flat-area H5/V3 NR, no chroma attenuation or new row RAM.
+// WIDE_NR=0 retains legacy arithmetic. WIDE_NR=1 center is one pixel further left.
 //============================================================================
 // 文件    ：chroma_denoise.v
 // 功能    ：色度降噪（Cb/Cr 域低通）—— 消除高增益下的彩色噪点，同时不损失清晰度
@@ -84,6 +86,7 @@ module chroma_denoise #(
     parameter        IMG_WIDTH = 1280,   // 一行像素数，必须与视频时序一致
     parameter        ADDR_W    = 12,     // 列地址位宽
     parameter [1:0]  NR_MODE   = 2'd2,   // 0:旁路  1:仅水平  2:完整3×3
+    parameter        WIDE_NR   = 1'b0, // Flat-area H5/V3; color edges retain H3.
     parameter        LUMA_NR   = 1'b0, // Median horizontal + edge-limited vertical, no extra row RAM.
     parameter        NR_EN     = 1'b1    // 总开关：1 启用；0 直通
 ) (
@@ -191,7 +194,26 @@ module chroma_denoise #(
                               ((a>c)?a:((b>c)?c:b));
         end
     endfunction
-    wire [7:0] h_y_clean=median3(y_t2,y_t1,s1_y);
+    wire [7:0] h_y_legacy=median3(y_t2,y_t1,s1_y);
+    reg [7:0] y_t3,y_t4,cb_t3,cb_t4,cr_t3,cr_t4;
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin y_t3<=0;y_t4<=0;cb_t3<=128;cb_t4<=128;cr_t3<=128;cr_t4<=128;end
+        else begin y_t3<=y_t2;y_t4<=y_t3;cb_t3<=cb_t2;cb_t4<=cb_t3;cr_t3<=cr_t2;cr_t4<=cr_t3;end
+    end
+    // [1 2 2 2 1]/8: center=t2. All channels share this source center.
+    wire [10:0] hy5={3'd0,y_t4}+{2'd0,y_t3,1'b0}+{2'd0,y_t2,1'b0}+{2'd0,y_t1,1'b0}+{3'd0,s1_y}+11'd4;
+    wire [10:0] hcb5={3'd0,cb_t4}+{2'd0,cb_t3,1'b0}+{2'd0,cb_t2,1'b0}+{2'd0,cb_t1,1'b0}+{3'd0,s1_cb}+11'd4;
+    wire [10:0] hcr5={3'd0,cr_t4}+{2'd0,cr_t3,1'b0}+{2'd0,cr_t2,1'b0}+{2'd0,cr_t1,1'b0}+{3'd0,s1_cr}+11'd4;
+    wire [9:0] hcb3={2'd0,cb_t3}+{1'b0,cb_t2,1'b0}+{2'd0,cb_t1}+10'd2;
+    wire [9:0] hcr3={2'd0,cr_t3}+{1'b0,cr_t2,1'b0}+{2'd0,cr_t1}+10'd2;
+    wire [7:0] h_y_delta=(y_t4>=s1_y)?y_t4-s1_y:s1_y-y_t4;
+    wire [7:0] h_cb_delta=(cb_t4>=s1_cb)?cb_t4-s1_cb:s1_cb-cb_t4;
+    wire [7:0] h_cr_delta=(cr_t4>=s1_cr)?cr_t4-s1_cr:s1_cr-cr_t4;
+    wire h_color_edge=(h_cb_delta>24 || h_cr_delta>24);
+    wire [7:0] h_y_wide=(h_y_delta>64)?median3(y_t3,y_t2,y_t1):hy5[10:3];
+    wire [7:0] h_y_clean=WIDE_NR?h_y_wide:h_y_legacy;
+    wire [7:0] h_cb_clean=WIDE_NR?(h_color_edge?hcb3[9:2]:hcb5[10:3]):h_cb_sum[9:2];
+    wire [7:0] h_cr_clean=WIDE_NR?(h_color_edge?hcr3[9:2]:hcr5[10:3]):h_cr_sum[9:2];
 
     //========================================================================
     // 级 2 寄存器：打包成 24bit 总线 {Y, Cr, Cb} 供后续行延时使用
@@ -210,9 +232,9 @@ module chroma_denoise #(
             hr_y   <= 8'd0;  hr_cb <= 8'd128;  hr_cr <= 8'd128;
         end else begin
             h_de   <= s1_de;
-            hr_y   <= LUMA_NR ? h_y_clean : y_t1;              // 亮度：延时对齐，不滤波
-            hr_cb  <= h_cb_sum[9:2];     // 色度：除以 4 完成 [1 2 1] 归一化
-            hr_cr  <= h_cr_sum[9:2];
+            hr_y   <= LUMA_NR ? h_y_clean : (WIDE_NR?y_t2:y_t1);              // 亮度：延时对齐，不滤波
+            hr_cb  <= h_cb_clean;     // 色度：除以 4 完成 [1 2 1] 归一化
+            hr_cr  <= h_cr_clean;
         end
     end
 
@@ -309,8 +331,11 @@ module chroma_denoise #(
     wire [7:0] y_up_delta=(y_up>=p1_y)?y_up-p1_y:p1_y-y_up;
     wire [7:0] y_dn_delta=(y_dn>=p1_y)?y_dn-p1_y:p1_y-y_dn;
     // Preserve edges: replace a neighbor by the center when contrast >24.
-    wire [7:0] y_up_safe=(y_up_delta<=24)?y_up:p1_y;
-    wire [7:0] y_dn_safe=(y_dn_delta<=24)?y_dn:p1_y;
+    // Dark/midtone noise can exceed24 after gamma. Let real averaging act
+    // up to48 here; bright-area and large-contrast edges retain the old bound.
+    wire [7:0] y_limit=(WIDE_NR && p1_y<160)?8'd48:8'd24;
+    wire [7:0] y_up_safe=(y_up_delta<=y_limit)?y_up:p1_y;
+    wire [7:0] y_dn_safe=(y_dn_delta<=y_limit)?y_dn:p1_y;
     wire [9:0] y_vertical={2'd0,y_up_safe}+{1'b0,p1_y,1'b0}+{2'd0,y_dn_safe}+10'd2;
     reg [7:0] v_y, v_cb, v_cr;      // NR_MODE 决定来源，故用 reg 在 generate 之外声明
 
