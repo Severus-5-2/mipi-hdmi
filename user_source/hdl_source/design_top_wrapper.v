@@ -65,7 +65,7 @@ module design_top_wrapper (
     wire [15:0] 	S_ag;
     wire [1:0] S_raw_nr_level;
     wire [27:0] S_ae_quality_status;
-    wire S_ae_highlight;
+    wire [1:0] S_ae_highlight;
     wire 			S_cam_cfg_done;
     wire 			S_ae_cfg_done;
     wire 			S_ae_req; 
@@ -583,7 +583,6 @@ module design_top_wrapper (
     ) u_gamma_lut(
         .clk    (S_hdmi_pixel_clk),
         .rst_n  (S_hdmi_rst_n),
-        .I_nr_level(S_raw_nr_level),.I_vsync(S_hdmi_vsync),
         .rgb_in (S_video_rd_data),
         .rgb_out(S_video_bright)
     );
@@ -760,7 +759,7 @@ module design_top_wrapper (
   ae_set #(
       .AUTO_EN    (1      ),   // Always active, including during button adjustment
       .TARGET_DEF (8'd128 ),   // Quality target; explicit override matches ae_set default
-      .WAIT_FRAMES(4'd3   )    // 两次调整间隔帧数（手册要求曝光 N+2 帧生效）
+      .WAIT_FRAMES(4'd5   )    // 两次调整间隔帧数（手册要求曝光 N+2 帧生效）
   ) u_ae_set (
       .I_clk(S_24m_clk),
       .I_rst(~S_rst_n),

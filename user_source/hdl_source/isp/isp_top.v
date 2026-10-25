@@ -140,11 +140,10 @@ module raw_bayer_nr #(
     function [1:0] choose_level;
         input [15:0] gain_value;input [1:0] previous;
         begin
-            case(previous)
-            0:choose_level=(gain_value>=160)?2:(gain_value>=96)?1:0;
-            1:choose_level=(gain_value>=160)?2:(gain_value<=88)?0:1;
-            default:choose_level=(gain_value<=88)?0:(gain_value<=152)?1:2;
-            endcase
+            // One effective noise-reduction strength, no151/167 quality boundary.
+            // Preserve clean low-gain bypass with64/56 hysteresis only.
+            if(previous==0) choose_level=(gain_value>=64)?2:0;
+            else choose_level=(gain_value<=56)?0:2;
         end
     endfunction
     wire [1:0] next_level=(gain_sync==gain_prev)?choose_level(gain_sync,level):level;
