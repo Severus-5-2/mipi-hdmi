@@ -227,6 +227,9 @@ module design_top_wrapper (
     //===== 张铭晨 track_box：像素坐标 + 画框 + 坐标 OSD（D1）=====
     wire [10:0] S_pix_x, S_pix_x_1d, S_pix_x_2d;
     wire [9:0]  S_pix_y, S_pix_y_1d, S_pix_y_2d;
+    localparam FIELD_METER_DIAG=1'b1; // Temporary white-wall measurement overlay
+    wire [359:0] S_field_bcd;
+    wire [1:0] S_field_ready;
     wire        S_frame_done;      // 每帧结束脉冲（消隐期计算用）
     wire        S_box_hit;         // 画框 / 十字准星命中
     wire [23:0] S_box_color;
@@ -1267,6 +1270,16 @@ isp_top u_isp_top (
         .O_roi_bcd(S_roi_activity_bcd),
         .O_red_state(S_red_motion), .O_blue_state(S_blue_motion)
     );
+    generate if(FIELD_METER_DIAG) begin:g_field_diag
+        color_field_meter u_color_field_meter(
+            .clk(S_hdmi_pixel_clk),.rst_n(S_hdmi_rst_n),
+            .I_de(S_hdmi_de),.I_frame(S_frame_done),.I_x(S_pix_x),.I_y(S_pix_y),
+            .I_linear(S_video_rd_data),.I_display(S_video_sat),
+            .O_bcd(S_field_bcd),.O_ready(S_field_ready)
+        );
+    end else begin:g_no_field_diag
+        assign S_field_bcd=360'd0;assign S_field_ready=2'd0;
+    end endgenerate
     motion_event_osd #(
         .ROI_X0(ALARM_X0), .ROI_X1(ALARM_X1),
         .ROI_Y0(ALARM_Y0), .ROI_Y1(ALARM_Y1)
@@ -1274,6 +1287,7 @@ isp_top u_isp_top (
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
         .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),.I_ae_quality_status(S_ae_quality_status),
+        .I_cal_enable(FIELD_METER_DIAG),.I_cal_bcd(S_field_bcd),.I_cal_ready(S_field_ready),
         .I_alarm(S_event_alarm), .I_ready(S_event_ready),
         .I_events_bcd(S_event_count),
         .I_roi_bcd(S_roi_activity_bcd), .I_det_full(S_detection_full),
