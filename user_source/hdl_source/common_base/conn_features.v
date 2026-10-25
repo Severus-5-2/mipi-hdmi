@@ -44,7 +44,8 @@ module conn_features #(
     parameter integer FAIR_COLORS = 0,
     parameter integer GROUP_CAPS = 0,
     parameter integer GROUP_MIN_AREA = 32,
-    parameter integer GROUP_GAP = 16
+    parameter integer GROUP_GAP = 16,
+    parameter integer CAP_GEOMETRY = 0 // Raw width/height <=2.5 before tracker padding.
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -242,6 +243,11 @@ module conn_features #(
     wire [20:0] g_area={1'b0,g_pending[SF_AREA +: 20]}+{1'b0,g_probe[SF_AREA +: 20]};
     wire [11:0] g_center_x={1'b0,g_pending[SF_XMIN +: 11]}+{1'b0,g_pending[SF_XMAX +: 11]};
     wire [10:0] g_center_y={1'b0,g_pending[SF_YMIN +: 10]}+{1'b0,g_pending[SF_YMAX +: 10]};
+    wire [13:0] raw_w2={2'd0,g_width}<<1,raw_h2={2'd0,g_height}<<1;
+    wire [13:0] raw_w5=({2'd0,g_width}<<2)+{2'd0,g_width};
+    wire [13:0] raw_h5=({2'd0,g_height}<<2)+{2'd0,g_height};
+    wire cap_geometry_ok=!CAP_GEOMETRY ||
+        (g_width>=4 && g_height>=4 && raw_w2<=raw_h5 && raw_h2<=raw_w5);
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             s0<=0;s1<=0;s2<=0;s3<=0;l0<=0;l1<=0;l2<=0;l3<=0;O_update<=0;
@@ -289,7 +295,7 @@ module conn_features #(
                     g_pending[SF_CY +: 10]<=g_center_y[10:1];g_state<=G_INSERT;
                 end
                 G_INSERT: begin
-                    if(g_pending[SF_AREA +: 20]>=GROUP_MIN_AREA && g_pending[SF_AREA +: 20]>=g_support_needed && (!FAIR_COLORS || fair_accept)) begin
+                    if(g_pending[SF_AREA +: 20]>=GROUP_MIN_AREA && g_pending[SF_AREA +: 20]>=g_support_needed && cap_geometry_ok && (!FAIR_COLORS || fair_accept)) begin
                         s0<=FAIR_COLORS?fair0:n0;s1<=FAIR_COLORS?fair1:n1;
                         s2<=FAIR_COLORS?fair2:n2;s3<=FAIR_COLORS?fair3:n3;
                     end

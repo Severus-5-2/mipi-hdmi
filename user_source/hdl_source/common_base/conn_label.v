@@ -54,6 +54,7 @@ module conn_label #(
     parameter integer COLOR_SEPARATE = 0,          // split runs/components at class boundaries
     parameter integer RESERVE_COLORS = 0,          // keep one unused label for each unseen RGB class
     parameter integer RECLAIM_SMALL = 0,
+    parameter integer EMIT_COMPLETED = 0, // Stream completed child-free roots before label reuse; GROUP_CAPS consumer.
     parameter integer RECLAIM_MIN_AREA = MIN_AREA,
     parameter integer OUT_SPACING = 0,
     parameter integer LINK_GAP = 0, // Same-class adjacent-row gap, pixels.
@@ -629,10 +630,18 @@ module conn_label #(
             if(ci!=scan_label && eq[ci]==scan_label) scan_child=1;
     end
     wire scan_recent=recent_row0[scan_label] || recent_row1[scan_label] || recent_row2[scan_label];
+    reg [7:0] reclaim_gap;
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) reclaim_gap<=0;
+        else if(I_frame_done) reclaim_gap<=0;
+        else if(reclaim_fire && EMIT_COMPLETED) reclaim_gap<=(OUT_SPACING>1)?OUT_SPACING-1:0;
+        else if(reclaim_gap!=0) reclaim_gap<=reclaim_gap-1'b1;
+    end
     wire reclaim_candidate=RECLAIM_SMALL && scan_active && !I_de &&
         scan_label!=0 && scan_label<lbl_next && free_label==0 && !reclaim_fire &&
         eq[scan_label]==scan_label && !scan_child &&
-        !scan_recent && (!acc_area_ok[scan_label] || !acc_tall[scan_label]);
+        !scan_recent && (!EMIT_COMPLETED || reclaim_gap==0) &&
+        (EMIT_COMPLETED || !acc_area_ok[scan_label] || !acc_tall[scan_label]);
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             last_active_y<=0; reclaim_delay<=0; scan_active<=0;
@@ -1161,6 +1170,22 @@ module conn_label #(
             end
             default: st <= S_IDLE;
             endcase
+            // Reclaimer waits for three absent rows and excludes roots with
+            // equivalence children. Capture before the accumulator clears on
+            // this same edge. No pixel replay can still refer to this leaf.
+            // Early IDs may be reused; the consumer groups by class/geometry,
+            // not persistent label ID. O_cmp_cnt remains the final-root count.
+            if(EMIT_COMPLETED && reclaim_fire && st==S_IDLE &&
+               !I_frame_done && acc_area[reclaim_label]>=MINA) begin
+                O_cmp_valid<=1;
+                O_cmp_label<=reclaim_label;
+                O_cmp_cls<=cls_lbl[reclaim_label];
+                O_cmp_area<=acc_area[reclaim_label];
+                O_cmp_xmin<=acc_xmin[reclaim_label];O_cmp_xmax<=acc_xmax[reclaim_label];
+                O_cmp_ymin<=acc_ymin[reclaim_label];O_cmp_ymax<=acc_ymax[reclaim_label];
+                O_cmp_cx<=({1'b0,acc_xmin[reclaim_label]}+{1'b0,acc_xmax[reclaim_label]})>>1;
+                O_cmp_cy<=({1'b0,acc_ymin[reclaim_label]}+{1'b0,acc_ymax[reclaim_label]})>>1;
+            end
         end
     end
 

@@ -64,7 +64,8 @@ module target_assoc #(
     parameter integer VEL_SHIFT  = 2,     // 速度 EMA α = 1/4
     parameter integer DEADZONE   = 2,     // 死区：|Δ| < 2 px 不更新
     parameter integer MAX_MISS   = 5,     // 连续 5 帧无匹配 → 删框
-    parameter integer MATCH_TH   = 96,    // 关联代价门限（曼哈顿域）
+    parameter integer MATCH_TH   = 96,
+    parameter integer ACQUIRE_MIN = 48, // Minimum gate for unconfirmed small tracks; confirmed tracking unchanged.    // 关联代价门限（曼哈顿域）
     parameter integer AREA_SHIFT = 8,     // 面积差缩放（>> 8）
     // ⚠ CLS_PEN 故意设得 > MATCH_TH：效果 = 「类别不同就基本不关联」。
     //   演示场景各目标一色，颜色是强特征，这样最稳（不会两个不同色目标互相串框）。
@@ -276,7 +277,7 @@ module target_assoc #(
         P_cost  = {4{13'h1FFF}}; P_gate={4{MATCH_TH[12:0]}}; C_gate=13'd16;
         for (mi = 0; mi < 4; mi = mi + 1) begin
             C_gate={1'b0,R_radius_x[mi*11 +: 11],1'b0}+{1'b0,R_radius_y[mi*11 +: 11],1'b0};
-            if(C_gate<48) C_gate=48;
+            if(C_gate<ACQUIRE_MIN) C_gate=ACQUIRE_MIN;
             if(C_gate>96) C_gate=96;
             if(C_gate>MATCH_TH) C_gate=MATCH_TH;
             P_gate[mi*13 +: 13]=(!CAP_FILTER || R_confirm[mi])?MATCH_TH[12:0]:C_gate;

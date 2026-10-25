@@ -1215,7 +1215,7 @@ isp_top u_isp_top (
     //    ⚠ 三者的 I_frame_done 全部接 S_det_fdone（与总线锁存同源 ⇒ 早 0 拍，
     //      绝不会落进冻结表 §1.1 说的"中间地带"）
     //==================================================================
-    target_assoc #(.CAP_FILTER(1), .MAX_MISS(5), .EMA_SHIFT(1), .MATCH_TH(144), .CLS_PEN(256)) u_target_assoc (
+    target_assoc #(.ACQUIRE_MIN(16), .CAP_FILTER(1), .MAX_MISS(5), .EMA_SHIFT(1), .MATCH_TH(144), .CLS_PEN(256)) u_target_assoc (
         .I_clk         ( S_hdmi_pixel_clk ),
         .I_rst_n       ( S_hdmi_rst_n     ),
         .I_frame_done  ( S_det_fdone      ),
@@ -1428,7 +1428,7 @@ isp_top u_isp_top (
         .CONTINUE_SHORT ( 1 ),           // preserve narrow connected edges; seed threshold stays 8
         .COLOR_SEPARATE ( 1 ),           // touching red/blue/green objects remain distinct
         .RESERVE_COLORS ( 1 ),           // reserve labels for colors arriving later in raster order
-        .RECLAIM_MIN_AREA ( 32 ),
+        .RECLAIM_MIN_AREA ( 16 ), .LMIN(5), .EMIT_COMPLETED(1),
         .OUT_SPACING ( 64 ), .CCL_CAPACITY ( 10 ), .LINK_GAP(3),
         .RECLAIM_SMALL ( 1 )             // free expired tiny/flat leaf regions during line blanking
     )u_conn_label(
@@ -1461,7 +1461,7 @@ isp_top u_isp_top (
 
     conn_features #(
         .SLOT_N ( `TARGET_MAX ),        // 4
-        .GROUP_CAPS ( 1 ), .GROUP_MIN_AREA ( 32 ), .GROUP_GAP ( 16 ),
+        .GROUP_CAPS ( 1 ), .GROUP_MIN_AREA ( 16 ), .GROUP_GAP ( 16 ), .CAP_GEOMETRY(1),
         .FAIR_COLORS ( 1 )              // retain each color's best component before duplicates
     )u_conn_features(
         .clk               ( S_hdmi_pixel_clk ),
