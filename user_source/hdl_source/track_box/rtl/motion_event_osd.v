@@ -10,7 +10,7 @@ module motion_event_osd #(
     input wire I_color_mode,
     input wire [11:0] I_counts,
     input wire [1:0] I_nr_level,
-    input wire I_gain_manual,
+    input wire [27:0] I_ae_quality_status,
     input wire I_alarm,I_ready,
     input wire [7:0] I_events_bcd,
     input wire [11:0] I_roi_bcd,
@@ -23,13 +23,13 @@ module motion_event_osd #(
     // Two synchronizers plus stable-sample/frame-boundary acceptance avoid
     // a changing NR label during one displayed frame; level3 is invalid.
     reg [1:0] nr_meta,nr_sync,nr_prev,nr_frame;
-    reg gm_meta,gm_sync,gm_frame;
+    reg [27:0] qs_meta,qs_sync,qs_prev,qs_frame;
     always @(posedge I_clk or negedge I_rst_n) begin
-        if(!I_rst_n) begin nr_meta<=0;nr_sync<=0;nr_prev<=0;nr_frame<=0;gm_meta<=0;gm_sync<=0;gm_frame<=0;end
+        if(!I_rst_n) begin nr_meta<=0;nr_sync<=0;nr_prev<=0;nr_frame<=0;qs_meta<=0;qs_sync<=0;qs_prev<=0;qs_frame<=0;end
         else begin
             nr_meta<=I_nr_level;nr_sync<=nr_meta;nr_prev<=nr_sync;
-            gm_meta<=I_gain_manual;gm_sync<=gm_meta;
-            if(I_de && I_pix_x==0 && I_pix_y==0) gm_frame<=gm_sync;
+            qs_meta<=I_ae_quality_status;qs_sync<=qs_meta;qs_prev<=qs_sync;
+            if(I_de && I_pix_x==0 && I_pix_y==0 && qs_sync==qs_prev) qs_frame<=qs_sync;
             if(I_de && I_pix_x==0 && I_pix_y==0 && nr_sync==nr_prev && nr_sync!=3)
                 nr_frame<=nr_sync;
         end
@@ -55,7 +55,9 @@ module motion_event_osd #(
                 3'd7:line_text={"BLUE:",state_word(I_blue_state),"      "};
                 3'd0:line_text={"DET:",(I_det_full?"FULL":"NORM"),"        "};
                 3'd1:line_text={"SW4:1 R",(8'h30+{4'd0,I_counts[3:0]})," B",(8'h30+{4'd0,I_counts[7:4]})," G",(8'h30+{4'd0,I_counts[11:8]}),"  "};
-                default:line_text=gm_frame?"GAIN:MANUAL     ":"GAIN:AUTO       ";
+                default:line_text={"AE:",(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),
+                    (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," MAX:",
+                    (8'h30+{4'd0,qs_frame[27:24]}),(8'h30+{4'd0,qs_frame[23:20]}),(8'h30+{4'd0,qs_frame[19:16]})," "};
             endcase
         end else begin
             case(I_pix_y[6:4])
@@ -65,7 +67,9 @@ module motion_event_osd #(
                     ({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),"         "};
                 3'd0:line_text="AUTO:CLEAR      ";
                 3'd1:line_text="SW4:0           ";
-                default:line_text=gm_frame?"GAIN:MANUAL     ":"GAIN:AUTO       ";
+                default:line_text={"AE:",(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),
+                    (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," MAX:",
+                    (8'h30+{4'd0,qs_frame[27:24]}),(8'h30+{4'd0,qs_frame[23:20]}),(8'h30+{4'd0,qs_frame[19:16]})," "};
             endcase
         end
     end
@@ -136,6 +140,7 @@ module motion_event_osd #(
             8'h55:font=35'b10001100011000110001100011000101110; // U
             8'h56:font=35'b10001100011000110001100010101000100; // V
             8'h57:font=35'b10001100011000110101101011101110001; // W
+            8'h58:font=35'b10001100010101000100010101000110001; // X
             8'h5a:font=35'b11111000010001000100010001000011111; // Z
             default:font=35'd0;
         endcase end

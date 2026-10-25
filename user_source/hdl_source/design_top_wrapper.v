@@ -64,7 +64,8 @@ module design_top_wrapper (
 	wire [15:0] 	S_ae;
     wire [15:0] 	S_ag;
     wire [1:0] S_raw_nr_level;
-    wire S_gain_manual;
+    wire [27:0] S_ae_quality_status;
+    wire S_ae_highlight;
     wire 			S_cam_cfg_done;
     wire 			S_ae_cfg_done;
     wire 			S_ae_req; 
@@ -582,6 +583,7 @@ module design_top_wrapper (
     ) u_gamma_lut(
         .clk    (S_hdmi_pixel_clk),
         .rst_n  (S_hdmi_rst_n),
+        .I_nr_level(S_raw_nr_level),.I_vsync(S_hdmi_vsync),
         .rgb_in (S_video_rd_data),
         .rgb_out(S_video_bright)
     );
@@ -660,6 +662,7 @@ module design_top_wrapper (
         .rst_n          (S_hdmi_rst_n),
         .I_de           (S_hdmi_de),
         .I_rgb          (S_video_bright),
+        .O_highlight(S_ae_highlight),
         .O_Y_avg        (S_ae_y_avg),
         .O_frame_toggle (S_ae_frame_tog)
     );
@@ -755,11 +758,8 @@ module design_top_wrapper (
 
   
   ae_set #(
-      .AUTO_EN    (1      ),   // Auto at boot; K1/K2 select manual gain, both held1s returns auto
-      .TARGET_DEF (8'd145 ),   // ★v6.4：靶亮度 120→145（120 对应显示域偏暗，用户反馈"和手机差距大"）
-                               //   ⚠【易错点】此处显式传参会【覆盖】ae_set 模块内 TARGET_DEF 的默认值，
-                               //     改靶亮度时两处必须同步；v6.3 只改了模块默认值(145)而此处仍传 120，
-                               //     导致"A 项 120→145"整轮失效 —— 排查画质问题先看这里。
+      .AUTO_EN    (1      ),   // Always active, including during button adjustment
+      .TARGET_DEF (8'd128 ),   // Quality target; explicit override matches ae_set default
       .WAIT_FRAMES(4'd3   )    // 两次调整间隔帧数（手册要求曝光 N+2 帧生效）
   ) u_ae_set (
       .I_clk(S_24m_clk),
@@ -767,11 +767,12 @@ module design_top_wrapper (
       .I_btn({I_button,2'b11}),
       .I_cam_cfg_done(S_cam_cfg_done),
       .I_ae_cfg_done(S_ae_cfg_done),
+      .I_highlight(S_ae_highlight),
       .I_Y_avg       (S_ae_y_avg),      // 来自 ae_meter（异步于本时钟域，内部已做同步）
       .I_frame_toggle(S_ae_frame_tog),
       .O_ae_req(S_ae_req),
       .O_ae(S_ae),
-      .O_ag(S_ag),.O_manual_gain(S_gain_manual)
+      .O_ag(S_ag),.O_quality_status(S_ae_quality_status)
   );
   
     // SC520CS原厂真实HD模式：1280x720@60、RAW10、2-Lane、828 Mbps/Lane。
@@ -1273,7 +1274,7 @@ isp_top u_isp_top (
     )u_motion_event_osd(
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
-        .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),.I_gain_manual(S_gain_manual),
+        .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),.I_ae_quality_status(S_ae_quality_status),
         .I_alarm(S_event_alarm), .I_ready(S_event_ready),
         .I_events_bcd(S_event_count),
         .I_roi_bcd(S_roi_activity_bcd), .I_det_full(S_detection_full),

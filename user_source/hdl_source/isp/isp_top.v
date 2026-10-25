@@ -258,7 +258,7 @@ module raw_bayer_nr #(
         wire [10:0] mix={1'b0,r}+{1'b0,f}+11'd1;
         // Large differences choose HALF filtering, never raw-only veto.
         // Noise spikes can exceed an edge threshold too.
-        assign edge_lane[k]=(delta>10'd128);
+        assign edge_lane[k]=(delta>10'd256); // Only very large contrast halves strong NR
         assign blended[k*10 +:10]=mix[10:1];
     end endgenerate
     always @(posedge clk or negedge rst_n) begin

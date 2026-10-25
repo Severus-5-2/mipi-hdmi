@@ -45,11 +45,9 @@
 //    本模块用 WAIT_FRAMES（默认 3）控制两次调整之间的最小间隔，
 //    即每 4 帧（≈66 ms）最多调整一次，确保上一次调整的画面已经完全稳定。
 //
-//  2026-10-25: K1/K2 directly adjust gain after the first single-key action.
-//  Auto exposure remains the power-up default. Manual gain freezes both AE and
-//  AG at the current exposure, so the feedback loop cannot undo button changes.
-//  Hold BOTH keys for about1s to return to auto; release both before new actions.
-//  Single click changes gain code16, long hold repeats code1 at the old tick.
+//  2026-10-25: AE ALWAYS remains active. K1/K2 lower/raise its gain ceiling.
+//  Keys never freeze exposure or feedback. BOTH held~1s restore quality ceiling.
+//  Default target128 and gain ceiling175 favor image quality over dark boost.
 //=============================================================================
 
 module ae_set
@@ -61,19 +59,20 @@ module ae_set
     input  wire        I_cam_cfg_done,  // sensor 初始化寄存器写入完成
 
     input  wire [ 7:0] I_Y_avg,         // 【新增】帧平均亮度（来自 ae_meter，异步于 I_clk）
+    input  wire        I_highlight,    // Frame-held highlight guard from ae_meter
     input  wire        I_frame_toggle,  // 【新增】帧握手电平，每帧翻转一次（异步）
 
     output wire        O_ae_req,        // 请求写一次曝光/增益
     output wire [15:0] O_ae,            // 曝光值（单位 1/2 行）
     output wire [15:0] O_ag,            // 增益控制字（送 SC520GainTbl 查表）
-    output wire        O_manual_gain    // Read-only OSD status:1=button gain hold
+    output reg [27:0]  O_quality_status // {gain ceiling BCD3, exposure command BCD4}
 );
 
 //=============================================================================
 //  可调参数（综合期常量，改完需重新编译）
 //=============================================================================
 parameter           AUTO_EN     = 1'b1;      // 1:自动曝光使能  0:关闭自动（纯手动）
-parameter [ 7:0]    TARGET_DEF  = 8'd145;    // 上电默认靶亮度（Gamma 后显示域，中灰偏亮）
+parameter [ 7:0]    TARGET_DEF  = 8'd128;    // 上电默认靶亮度（Gamma 后显示域，中灰偏亮）
                                              // v6.3 A项：120→145。120 对应线性域约 18% 灰，
                                              // 显示域偏暗（用户"和手机差距大"）；145 约 30% 灰，
                                              // 接近相机 18% 中灰经 sRGB 显示后的观感亮度。
@@ -87,6 +86,7 @@ parameter [15:0]    AE_MIN      = 16'd4;     // 曝光下限（手册规定）
 parameter [15:0]    AE_MAX      = 16'd1991;  // 曝光上限（= 2×VTS−9，满帧）
 parameter [15:0]    AG_MIN      = 16'd16;    // 增益控制字下限 = 1x
 // 2026-10-24: quality ceiling 55x (199); old 207 is 63x.
+parameter [15:0]    AG_QUALITY_MAX = 16'd175; // Default quality ceiling; K2 can raise it
 parameter [15:0]    AG_MAX      = 16'd199;   // 增益控制字上限
                                              // ★v6.6：239(126x) → 207(63x)。
                                              //   原因：现场照片定量分析证明屏幕噪点是
@@ -149,8 +149,7 @@ end
 reg [1:0] key_s0=0,key_s1=0,key_stable=0,key_prev=0;
 reg [7:0] chord_ticks=0;
 reg chord_lock=0;
-reg manual_gain=!AUTO_EN;
-assign O_manual_gain=manual_gain;
+reg [15:0] gain_ceiling=AG_QUALITY_MAX;
 always @(posedge I_clk or posedge I_rst) begin
     if(I_rst) begin
         key_s0<=0;key_s1<=0;key_stable<=0;key_prev<=0;
@@ -172,7 +171,7 @@ always @(posedge I_clk or posedge I_rst) begin
 end
 wire btn_add_edge=key_stable[1] && !key_prev[1];
 wire btn_sub_edge=key_stable[0] && !key_prev[0];
-wire return_auto=AUTO_EN && key_stable==2'b11 && r_ae_tick && chord_ticks==239;
+wire reset_quality=AUTO_EN && key_stable==2'b11 && r_ae_tick && chord_ticks==239;
 wire key_single=key_stable==2'b01 || key_stable==2'b10;
 // Start repeat only after~300ms held, so a short click is exactly16 codes
 // regardless of the free-running repeat tick phase.
@@ -194,27 +193,26 @@ wire [15:0] gain_key_step=(btn_add_edge || btn_sub_edge)?16'd16:16'd1;
 //      两级同步可把亚稳态收敛概率压到极低；
 //      数据 Y_avg 本身保持整帧不变，因此在脉冲时刻采样必定采到稳定值。
 //=============================================================================
-reg [1:0] tog_sync;   //synthesis syn_preserve
+reg [2:0] tog_sync;   //synthesis syn_preserve
 
 always @(posedge I_clk or posedge I_rst) begin
     if (I_rst)
-        tog_sync <= 2'b00;
+        tog_sync <= 3'b000;
     else
-        tog_sync <= {tog_sync[0], I_frame_toggle};
+        tog_sync <= {tog_sync[1:0], I_frame_toggle};
 end
 
-wire frame_pulse = tog_sync[1] ^ tog_sync[0];   // 单周期，指示"新一帧统计已就绪"
+wire frame_pulse = tog_sync[2] ^ tog_sync[1];   // 单周期，指示"新一帧统计已就绪"
 
 //-----------------------------------------------------------------------------
 //  采样 Y_avg（在 24 MHz 域内保存一份副本，后续判决都用它）
 //-----------------------------------------------------------------------------
 reg [7:0] y_cur;
+reg highlight_cur;
 
 always @(posedge I_clk or posedge I_rst) begin
-    if (I_rst)
-        y_cur <= 8'd0;
-    else if (frame_pulse)
-        y_cur <= I_Y_avg;
+    if (I_rst) begin y_cur<=0;highlight_cur<=0;end
+    else if (frame_pulse) begin y_cur<=I_Y_avg;highlight_cur<=I_highlight;end
 end
 
 //=============================================================================
@@ -234,8 +232,7 @@ always @(posedge I_clk or posedge I_rst) begin
         warm_cnt <= warm_cnt + 1'b1;
 end
 
-wire ae_ready = AUTO_EN && !manual_gain && key_stable==0 &&
-                (warm_cnt >= 3'd4) && I_cam_cfg_done;
+wire ae_ready = AUTO_EN && (warm_cnt >= 3'd4) && I_cam_cfg_done;
 
 //=============================================================================
 //  三、调整窗口生成（这是防振荡的核心）
@@ -281,8 +278,8 @@ wire signed [9:0] err = $signed({2'b00, t_target}) - $signed({2'b00, y_cur});
 //  取绝对值：全部用 signed 表达式，用符号位做选择即可，不需要切片
 wire signed [9:0] err_abs = err[9] ? (-err) : err;
 
-wire too_dark   = (err >  $signed({2'b00, DEADZONE}));   // 画面偏暗 → 需要提亮
-wire too_bright = (err < -$signed({2'b00, DEADZONE}));   // 画面偏亮 → 需要压暗
+wire too_dark   = !highlight_cur && (err >  $signed({2'b00, DEADZONE}));   // 画面偏暗 → 需要提亮
+wire too_bright = highlight_cur || (err < -$signed({2'b00, DEADZONE}));   // 画面偏亮 → 需要压暗
 
 //=============================================================================
 //  六、比例步进（分档查表）+ 单步变化上限（【两者缺一不可】）
@@ -322,7 +319,9 @@ reg [ 1:0] sh_ae;        // 曝光步长右移位数：0=×100%  1=50%  2=25%  3
 reg [15:0] step_ag;      // 增益固定步长
 
 always @(*) begin
-    if (err_abs >= 10'sd64) begin
+    if(highlight_cur) begin
+        sh_ae=2'd1;step_ag=16'd16;
+    end else if (err_abs >= 10'sd64) begin
         sh_ae = 2'd0;   step_ag = 16'd32;   //  差得多 → 大步前进
     end else if (err_abs >= 10'sd32) begin
         sh_ae = 2'd1;   step_ag = 16'd16;
@@ -354,36 +353,32 @@ wire [15:0] ef_ag = step_ag;
 //=============================================================================
 //  六、靶亮度寄存器 + 目标值寄存器 + 自动/手动调节
 //=============================================================================
-// Automatic mode keeps the established brightness target. Buttons control gain.
+// Keys change only the AG ceiling; the feedback loop runs continuously.
 wire [7:0] t_target=TARGET_DEF;
-reg [15:0] r_ae_set = AE_MAX;
-reg [15:0] r_ag_set = 16'd144;
-
+reg [15:0] r_ae_set=AE_MAX;
+reg [15:0] r_ag_set=16'd96;
 always @(posedge I_clk or posedge I_rst) begin
-    if (I_rst) begin
-        manual_gain<=!AUTO_EN;
-        r_ae_set<=AE_MAX;r_ag_set<=16'd144;
-    end else if(return_auto) begin
-        manual_gain<=0;
-    end else if(key_adjust) begin
-        // Manual action takes priority over the AE update window.
-        // Hold current exposure as well as gain; AE cannot compensate it away.
-        manual_gain<=1;
-        if(key_stable[0])
-            r_ag_set<=((r_ag_set-AG_MIN)>gain_key_step)?r_ag_set-gain_key_step:AG_MIN;
-        else
-            r_ag_set<=((AG_MAX-r_ag_set)>gain_key_step)?r_ag_set+gain_key_step:AG_MAX;
-    end else if(!manual_gain && key_stable==0 && adjust_win) begin
-        if(too_dark) begin
-            if(r_ae_set<AE_MAX)
-                r_ae_set<=((AE_MAX-r_ae_set)>ef_ae)?r_ae_set+ef_ae:AE_MAX;
-            else if(r_ag_set<AG_MAX)
-                r_ag_set<=((AG_MAX-r_ag_set)>ef_ag)?r_ag_set+ef_ag:AG_MAX;
-        end else if(too_bright) begin
+    if(I_rst) gain_ceiling<=AG_QUALITY_MAX;
+    else if(reset_quality) gain_ceiling<=AG_QUALITY_MAX;
+    else if(key_adjust) begin
+        if(key_stable[0]) gain_ceiling<=((gain_ceiling-AG_MIN)>gain_key_step)?gain_ceiling-gain_key_step:AG_MIN;
+        else gain_ceiling<=((AG_MAX-gain_ceiling)>gain_key_step)?gain_ceiling+gain_key_step:AG_MAX;
+    end
+end
+always @(posedge I_clk or posedge I_rst) begin
+    if(I_rst) begin r_ae_set<=AE_MAX;r_ag_set<=16'd96;end
+    else if(r_ag_set>gain_ceiling) r_ag_set<=gain_ceiling;
+    else if(adjust_win) begin
+        if(too_bright) begin
             if(r_ag_set>AG_MIN)
                 r_ag_set<=((r_ag_set-AG_MIN)>ef_ag)?r_ag_set-ef_ag:AG_MIN;
             else if(r_ae_set>AE_MIN)
                 r_ae_set<=((r_ae_set-AE_MIN)>ef_ae)?r_ae_set-ef_ae:AE_MIN;
+        end else if(too_dark) begin
+            if(r_ae_set<AE_MAX)
+                r_ae_set<=((AE_MAX-r_ae_set)>ef_ae)?r_ae_set+ef_ae:AE_MAX;
+            else if(r_ag_set<gain_ceiling)
+                r_ag_set<=((gain_ceiling-r_ag_set)>ef_ag)?r_ag_set+ef_ag:gain_ceiling;
         end
     end
 end
@@ -417,5 +412,24 @@ always @(posedge I_clk or posedge I_rst) begin
         r_ae_req <= 1;
     end
 end
+
+function [15:0] bcd11;
+    input [10:0] bin;
+    integer i,j;
+    reg [15:0] v;
+    begin
+        v=0;
+        for(i=10;i>=0;i=i-1) begin
+            for(j=0;j<4;j=j+1) if(v[j*4 +:4]>=5) v[j*4 +:4]=v[j*4 +:4]+4'd3;
+            v={v[14:0],bin[i]};
+        end
+        bcd11=v;
+    end
+endfunction
+wire [15:0] ceiling_bcd=bcd11(gain_ceiling[10:0]);
+wire [15:0] exposure_bcd=bcd11(r_ae[10:0]);
+always @(posedge I_clk or posedge I_rst)
+    if(I_rst) O_quality_status<=0;
+    else O_quality_status<={ceiling_bcd[11:0],exposure_bcd};
 
 endmodule

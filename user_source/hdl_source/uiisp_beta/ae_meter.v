@@ -117,6 +117,7 @@ module ae_meter #(
     input  wire        I_de,            // 数据有效（与数据眼图对齐前的原始 de）
     input  wire [23:0] I_rgb,           // RGB888，相对 I_de 延迟 PIPE_DELAY 拍
     output reg  [ 7:0] O_Y_avg,         // 本帧加权平均亮度（更新后保持整帧不变）
+    output reg         O_highlight,    // >=3.125% near-white, hysteresis clears below1.5625%
     output reg         O_frame_toggle   // 每帧翻转一次的电平（跨时钟握手用）
 );
 
@@ -160,7 +161,7 @@ always @(posedge clk or negedge rst_n) begin
         de_sr <= {de_sr[2:0], I_de};
 end
 
-wire de_al = de_sr[PIPE_DELAY];       // 与 I_rgb 同一拍对齐的数据有效信号
+wire de_al = (PIPE_DELAY==0)?I_de:de_sr[PIPE_DELAY-1];       // 与 I_rgb 同一拍对齐的数据有效信号
 
 //=============================================================================
 //  第二级：亮度 Y 计算 + 分区权重译码 + 像素坐标计数
@@ -263,6 +264,9 @@ wire [AW-1:0] acc_add = ({{(AW-8){1'b0}}, y_r} << w_sh_r);  // 加权后的增�
 reg [AW-1:0] acc;                     // 帧内加权亮度累加器
 reg [CW-1:0] pix_cnt;                 // 帧内像素计数
 reg [AW-1:0] acc_final;               // 帧末锁存的完整总和
+reg [19:0] hot_count;
+reg hot_frame;
+wire [19:0] hot_total=hot_count+{{19{1'b0}},(y_r>=8'd235)};
 reg          frame_end;               // 帧结束标志（单周期）
 
 always @(posedge clk or negedge rst_n) begin
@@ -270,16 +274,20 @@ always @(posedge clk or negedge rst_n) begin
         acc       <= {AW{1'b0}};
         pix_cnt   <= {CW{1'b0}};
         acc_final <= {AW{1'b0}};
-        frame_end <= 1'b0;
+        frame_end <= 1'b0;hot_count<=0;hot_frame<=0;
     end else if (val_r) begin
         if (pix_cnt >= PIX_LAST) begin
             //  本拍是最后一个有效像素：锁存结果并开启新一帧
             acc_final <= acc + acc_add;
             frame_end <= 1'b1;
-            acc       <= acc_add;               // 新帧的第一个像素
+            acc       <= 0; // Last pixel already included in acc_final; next frame starts empty
+            hot_count<=0;
+            if(hot_total>=PIX_TOTAL/32) hot_frame<=1;
+            else if(hot_total<=PIX_TOTAL/64) hot_frame<=0;
             pix_cnt   <= {CW{1'b0}};
         end else begin
             acc       <= acc + acc_add;
+            hot_count<=hot_total;
             pix_cnt   <= pix_cnt + 1'b1;
             frame_end <= 1'b0;
         end
@@ -319,10 +327,11 @@ end
 //=============================================================================
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        O_Y_avg        <= 8'd0;
+        O_Y_avg        <= 8'd0;O_highlight<=0;
         O_frame_toggle <= 1'b0;
     end else if (fe_r) begin
-        O_Y_avg        <= prod_r[39:32];
+        O_Y_avg        <= (|prod_r[PW-1:40])?8'd255:prod_r[39:32];
+        O_highlight<=hot_frame;
         O_frame_toggle <= ~O_frame_toggle;   // 每帧翻转一次 → 供对端检测新帧
     end
 end
