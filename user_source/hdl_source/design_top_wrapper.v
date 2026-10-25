@@ -597,22 +597,22 @@ module design_top_wrapper (
     //    资源：2 个行延时 BRAM；流水线设计（单级≤4 级逻辑），时序宽松
     //    延时：垂直上移 1 行 + 水平右移 1 像素，肉眼不可察；仅作用于彩色通路
     // gamma_lut registers RGB once; match its valid enable at the row RAM input.
-    reg R_gamma_de;
+    reg R_gamma_de,R_gamma_vsync,R_gamma_frame;
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
-        if(!S_hdmi_rst_n) R_gamma_de<=1'b0;
-        else R_gamma_de<=S_hdmi_de;
+        if(!S_hdmi_rst_n) begin R_gamma_de<=0;R_gamma_vsync<=0;R_gamma_frame<=0;end
+        else begin R_gamma_de<=S_hdmi_de;R_gamma_vsync<=S_hdmi_vsync;R_gamma_frame<=S_frame_done;end
     end
     chroma_denoise #(
         .IMG_WIDTH (1280  ),   // 必须与视频时序的行像素数一致，否则行缓存会错位
         .ADDR_W    (12    ),
         .NR_MODE   (2     ),
-        .WIDE_NR   (1     ),   // Five horizontal taps in flat areas; same row RAM/latency
         .LUMA_NR   (1     ),   // 2:完整3×3；1:仅水平（不占BRAM）；0:旁路
         .NR_EN     (1     )    // 1:启用；0:直通（A/B 对比用）
     ) u_chroma_denoise(
         .clk    (S_hdmi_pixel_clk),
         .rst_n  (S_hdmi_rst_n),
         .I_de   (R_gamma_de),       // Matches registered gamma RGB
+        .I_vsync(R_gamma_vsync),.I_frame(R_gamma_frame),
         .rgb_in (S_video_bright),
         .rgb_out(S_video_dn)
     );

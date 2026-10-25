@@ -1,5 +1,5 @@
-// 2026-10-25: optional flat-area H5/V3 NR, no chroma attenuation or new row RAM.
-// WIDE_NR=0 retains legacy arithmetic. WIDE_NR=1 center is one pixel further left.
+// 2026-10-25: restore 1325 H3 arithmetic; frame/line tags clamp missing neighbors.
+// Frame tags reset during vsync; row RAM, DSP arithmetic and clock latency retained.
 //============================================================================
 // 文件    ：chroma_denoise.v
 // 功能    ：色度降噪（Cb/Cr 域低通）—— 消除高增益下的彩色噪点，同时不损失清晰度
@@ -86,13 +86,14 @@ module chroma_denoise #(
     parameter        IMG_WIDTH = 1280,   // 一行像素数，必须与视频时序一致
     parameter        ADDR_W    = 12,     // 列地址位宽
     parameter [1:0]  NR_MODE   = 2'd2,   // 0:旁路  1:仅水平  2:完整3×3
-    parameter        WIDE_NR   = 1'b0, // Flat-area H5/V3; color edges retain H3.
     parameter        LUMA_NR   = 1'b0, // Median horizontal + edge-limited vertical, no extra row RAM.
     parameter        NR_EN     = 1'b1    // 总开关：1 启用；0 直通
 ) (
     input  wire             clk,         // 像素时钟（S_hdmi_pixel_clk）
     input  wire             rst_n,       // 低电平复位
     input  wire             I_de,        // 数据有效（必须与 rgb_in 同一拍对齐）
+    input  wire             I_vsync,     // Aligned with rgb_in/I_de, asserted during vertical blanking.
+    input  wire             I_frame,     // Aligned first active pixel; no RAM contents are reset.
     input  wire [23:0]      rgb_in,      // 输入 RGB888
     output reg  [23:0]      rgb_out      // 输出 RGB888
 );
@@ -133,15 +134,15 @@ module chroma_denoise #(
     //========================================================================
     // 级 1 寄存器
     //========================================================================
-    reg        s1_de;
+    reg        s1_de,s1_vsync,s1_frame;
     reg [7:0]  s1_y, s1_cb, s1_cr;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            s1_de <= 1'b0;
+            s1_de <= 1'b0;s1_vsync<=1'b0;s1_frame<=1'b0;
             s1_y  <= 8'd0;  s1_cb <= 8'd128;  s1_cr <= 8'd128;
         end else begin
-            s1_de <= I_de;
+            s1_de <= I_de;s1_vsync<=I_vsync;s1_frame<=I_frame && I_de;
             s1_y  <= y_w;
             s1_cb <= cb_w;
             s1_cr <= cr_w;
@@ -156,12 +157,24 @@ module chroma_denoise #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             col_cnt <= {ADDR_W{1'b0}};
+        else if(s1_vsync) col_cnt<=0;
+        else if(s1_de && s1_frame) col_cnt<={{(ADDR_W-1){1'b0}},1'b1};
         else if (s1_de)
             col_cnt <= (col_cnt == IMG_WIDTH[ADDR_W-1:0] - 1'b1) ? {ADDR_W{1'b0}} : col_cnt + 1'b1;
         else
             col_cnt <= {ADDR_W{1'b0}};
     end
 
+    // Valid rows in this frame only. Old RAM contents must never supply
+    // missing top neighbors. Vsync clears tags well before the next DE.
+    reg [1:0] rows_seen;
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) rows_seen<=0;
+        else if(s1_vsync || (s1_de && s1_frame)) rows_seen<=0;
+        else if(s1_de && col_cnt==IMG_WIDTH-1 && rows_seen!=2) rows_seen<=rows_seen+1'b1;
+    end
+    wire first_row=s1_frame || rows_seen==0;
+    wire second_row=!s1_frame && rows_seen==1;
     //========================================================================
     // 级 2 组合：水平三抽头 + [1 2 1]/4 低通
     //========================================================================
@@ -184,8 +197,14 @@ module chroma_denoise #(
     // 以 t1（前一列）为窗口中心：[t2, t1, s1] = [n-2, n-1, n]
     // 三个 8bit 之和最大 4×255 = 1020，10bit 足够。
     // ⚠️ **只对色度求和**：亮度 Y 不参与任何平滑，这是本模块的核心原则。
-    wire [9:0] h_cb_sum = cb_t2 + (cb_t1 << 1) + s1_cb;
-    wire [9:0] h_cr_sum = cr_t2 + (cr_t1 << 1) + s1_cr;
+    // Replicate the first valid pixel instead of reading blanking/last-line taps.
+    wire h_first=s1_frame || col_cnt==0;
+    wire h_second=col_cnt==1 && !s1_frame;
+    wire [7:0] yc=h_first?s1_y:y_t1,yl=(h_first || h_second)?yc:y_t2;
+    wire [7:0] cbc=h_first?s1_cb:cb_t1,cbl=(h_first || h_second)?cbc:cb_t2;
+    wire [7:0] crc=h_first?s1_cr:cr_t1,crl=(h_first || h_second)?crc:cr_t2;
+    wire [9:0] h_cb_sum = {2'd0,cbl}+{1'b0,cbc,1'b0}+{2'd0,s1_cb};
+    wire [9:0] h_cr_sum = {2'd0,crl}+{1'b0,crc,1'b0}+{2'd0,s1_cr};
 
     function [7:0] median3;
         input [7:0] a,b,c;
@@ -194,26 +213,7 @@ module chroma_denoise #(
                               ((a>c)?a:((b>c)?c:b));
         end
     endfunction
-    wire [7:0] h_y_legacy=median3(y_t2,y_t1,s1_y);
-    reg [7:0] y_t3,y_t4,cb_t3,cb_t4,cr_t3,cr_t4;
-    always @(posedge clk or negedge rst_n) begin
-        if(!rst_n) begin y_t3<=0;y_t4<=0;cb_t3<=128;cb_t4<=128;cr_t3<=128;cr_t4<=128;end
-        else begin y_t3<=y_t2;y_t4<=y_t3;cb_t3<=cb_t2;cb_t4<=cb_t3;cr_t3<=cr_t2;cr_t4<=cr_t3;end
-    end
-    // [1 2 2 2 1]/8: center=t2. All channels share this source center.
-    wire [10:0] hy5={3'd0,y_t4}+{2'd0,y_t3,1'b0}+{2'd0,y_t2,1'b0}+{2'd0,y_t1,1'b0}+{3'd0,s1_y}+11'd4;
-    wire [10:0] hcb5={3'd0,cb_t4}+{2'd0,cb_t3,1'b0}+{2'd0,cb_t2,1'b0}+{2'd0,cb_t1,1'b0}+{3'd0,s1_cb}+11'd4;
-    wire [10:0] hcr5={3'd0,cr_t4}+{2'd0,cr_t3,1'b0}+{2'd0,cr_t2,1'b0}+{2'd0,cr_t1,1'b0}+{3'd0,s1_cr}+11'd4;
-    wire [9:0] hcb3={2'd0,cb_t3}+{1'b0,cb_t2,1'b0}+{2'd0,cb_t1}+10'd2;
-    wire [9:0] hcr3={2'd0,cr_t3}+{1'b0,cr_t2,1'b0}+{2'd0,cr_t1}+10'd2;
-    wire [7:0] h_y_delta=(y_t4>=s1_y)?y_t4-s1_y:s1_y-y_t4;
-    wire [7:0] h_cb_delta=(cb_t4>=s1_cb)?cb_t4-s1_cb:s1_cb-cb_t4;
-    wire [7:0] h_cr_delta=(cr_t4>=s1_cr)?cr_t4-s1_cr:s1_cr-cr_t4;
-    wire h_color_edge=(h_cb_delta>24 || h_cr_delta>24);
-    wire [7:0] h_y_wide=(h_y_delta>64)?median3(y_t3,y_t2,y_t1):hy5[10:3];
-    wire [7:0] h_y_clean=WIDE_NR?h_y_wide:h_y_legacy;
-    wire [7:0] h_cb_clean=WIDE_NR?(h_color_edge?hcb3[9:2]:hcb5[10:3]):h_cb_sum[9:2];
-    wire [7:0] h_cr_clean=WIDE_NR?(h_color_edge?hcr3[9:2]:hcr5[10:3]):h_cr_sum[9:2];
+    wire [7:0] h_y_clean=median3(yl,yc,s1_y);
 
     //========================================================================
     // 级 2 寄存器：打包成 24bit 总线 {Y, Cr, Cb} 供后续行延时使用
@@ -223,18 +223,19 @@ module chroma_denoise #(
     //   能自动保持列对齐的关键。
     //========================================================================
     reg        h_de;
+    reg h_row0,h_row1,cur_row0,cur_row1,aligned_row0,aligned_row1;
     reg [ADDR_W-1:0] h_addr;
     reg [7:0]  hr_y, hr_cb, hr_cr;      // hr_* = horizontal result（已寄存）
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            h_de   <= 1'b0;
+            h_de   <= 1'b0;h_row0<=1'b1;h_row1<=1'b0;
             hr_y   <= 8'd0;  hr_cb <= 8'd128;  hr_cr <= 8'd128;
         end else begin
-            h_de   <= s1_de;
-            hr_y   <= LUMA_NR ? h_y_clean : (WIDE_NR?y_t2:y_t1);              // 亮度：延时对齐，不滤波
-            hr_cb  <= h_cb_clean;     // 色度：除以 4 完成 [1 2 1] 归一化
-            hr_cr  <= h_cr_clean;
+            h_de   <= s1_de;h_row0<=first_row;h_row1<=second_row;
+            hr_y   <= LUMA_NR ? h_y_clean : yc;              // 亮度：延时对齐，不滤波
+            hr_cb  <= h_cb_sum[9:2];     // 色度：除以 4 完成 [1 2 1] 归一化
+            hr_cr  <= h_cr_sum[9:2];
         end
     end
 
@@ -297,9 +298,9 @@ module chroma_denoise #(
     reg [7:0] cur_y, cur_cb, cur_cr;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            cur_y <= 8'd0; cur_cb <= 8'd128; cur_cr <= 8'd128;
+            cur_y <= 8'd0; cur_cb <= 8'd128; cur_cr <= 8'd128;cur_row0<=1;cur_row1<=0;
         end else begin
-            cur_y <= hr_y; cur_cb <= hr_cb; cur_cr <= hr_cr;
+            cur_y <= hr_y; cur_cb <= hr_cb; cur_cr <= hr_cr;cur_row0<=h_row0;cur_row1<=h_row1;
         end
     end
 
@@ -309,33 +310,36 @@ module chroma_denoise #(
     reg [7:0] cur_y_aligned,cur_cb_aligned,cur_cr_aligned;
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
-            p1_aligned<=24'h008080;
+            p1_aligned<=24'h008080;aligned_row0<=1;aligned_row1<=0;
             cur_y_aligned<=0;cur_cb_aligned<=128;cur_cr_aligned<=128;
         end else begin
-            p1_aligned<=p1_bus;
+            p1_aligned<=p1_bus;aligned_row0<=cur_row0;aligned_row1<=cur_row1;
             cur_y_aligned<=cur_y;cur_cb_aligned<=cur_cb;cur_cr_aligned<=cur_cr;
         end
     end
-    wire [7:0] p1_y  = (LUMA_NR ? p1_aligned[23:16] : p1_bus[23:16]);   // 中心行的亮度（Y 不滤波）
-    wire [7:0] p1_cb = (LUMA_NR ? p1_aligned[ 7:0 ] : p1_bus[ 7:0 ]);
-    wire [7:0] p1_cr = (LUMA_NR ? p1_aligned[15:8 ] : p1_bus[15:8 ]);
-    wire [7:0] p2_cb = p2_bus[ 7:0 ];
-    wire [7:0] p2_cr = p2_bus[15:8 ];
+    wire row0_now=LUMA_NR?aligned_row0:cur_row0;
+    wire row1_now=LUMA_NR?aligned_row1:cur_row1;
+    wire [7:0] cy=LUMA_NR?cur_y_aligned:cur_y;
+    wire [7:0] ccb=LUMA_NR?cur_cb_aligned:cur_cb;
+    wire [7:0] ccr=LUMA_NR?cur_cr_aligned:cur_cr;
+    wire [23:0] previous=LUMA_NR?p1_aligned:p1_bus;
+    wire [7:0] p1_y=row0_now?cy:previous[23:16];
+    wire [7:0] p1_cb=row0_now?ccb:previous[7:0];
+    wire [7:0] p1_cr=row0_now?ccr:previous[15:8];
+    wire [7:0] p2_cb=row0_now?ccb:row1_now?p1_cb:p2_bus[7:0];
+    wire [7:0] p2_cr=row0_now?ccr:row1_now?p1_cr:p2_bus[15:8];
 
     //========================================================================
     // 级 4 组合：垂直 [1 2 1]/4 低通（仅作用于色度）
     //   窗口中心为 p1（上一行），故输出整体上移一行。
     //========================================================================
-    wire [7:0] y_up=p2_bus[23:16];
+    wire [7:0] y_up=row0_now?cy:row1_now?p1_y:p2_bus[23:16];
     wire [7:0] y_dn=cur_y_aligned;
     wire [7:0] y_up_delta=(y_up>=p1_y)?y_up-p1_y:p1_y-y_up;
     wire [7:0] y_dn_delta=(y_dn>=p1_y)?y_dn-p1_y:p1_y-y_dn;
     // Preserve edges: replace a neighbor by the center when contrast >24.
-    // Dark/midtone noise can exceed24 after gamma. Let real averaging act
-    // up to48 here; bright-area and large-contrast edges retain the old bound.
-    wire [7:0] y_limit=(WIDE_NR && p1_y<160)?8'd48:8'd24;
-    wire [7:0] y_up_safe=(y_up_delta<=y_limit)?y_up:p1_y;
-    wire [7:0] y_dn_safe=(y_dn_delta<=y_limit)?y_dn:p1_y;
+    wire [7:0] y_up_safe=(y_up_delta<=24)?y_up:p1_y;
+    wire [7:0] y_dn_safe=(y_dn_delta<=24)?y_dn:p1_y;
     wire [9:0] y_vertical={2'd0,y_up_safe}+{1'b0,p1_y,1'b0}+{2'd0,y_dn_safe}+10'd2;
     reg [7:0] v_y, v_cb, v_cr;      // NR_MODE 决定来源，故用 reg 在 generate 之外声明
 
