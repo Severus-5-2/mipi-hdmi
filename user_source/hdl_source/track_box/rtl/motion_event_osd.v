@@ -1,6 +1,7 @@
 // Read-only display of the motion monitor. Two pixel clocks of latency,
 // matching box_draw and the external overlay input of hdmi_mixer.
 module motion_event_osd #(
+    parameter integer DISPLAY_NR_AB=0,
     parameter integer ROI_X0=320, ROI_X1=960,
     parameter integer ROI_Y0=192, ROI_Y1=576
 )(
@@ -10,6 +11,8 @@ module motion_event_osd #(
     input wire I_color_mode,
     input wire [11:0] I_counts,
     input wire [1:0] I_nr_level,
+    input wire I_scene_busy,
+    input wire I_display_nr_active, // Same pixel domain; phase held for a complete frame
     input wire [27:0] I_ae_quality_status,
     input wire I_cal_enable,
     input wire [359:0] I_cal_bcd,
@@ -53,10 +56,10 @@ module motion_event_osd #(
     always @* begin
         if(I_color_mode) begin
             case(I_pix_y[6:4])
-                3'd5:line_text={"MODE:COLOR NR:",(8'h30+{6'd0,nr_frame})," "}; // y=592
+                3'd5:line_text=DISPLAY_NR_AB?(I_display_nr_active?"COLOR NR:B D2   ":"COLOR NR:A ORIG "):{"MODE:COLOR NR:",(8'h30+{6'd0,nr_frame})," "}; // y=592
                 3'd6:line_text={"RED :",state_word(I_red_state),"      "};
                 3'd7:line_text={"BLUE:",state_word(I_blue_state),"      "};
-                3'd0:line_text={"DET:",(I_det_full?"FULL":"NORM"),"        "};
+                3'd0:line_text=DISPLAY_NR_AB?{"DET:",(I_det_full?"FULL":"NORM")," SCN:",(I_scene_busy?"1":"0"),"  "}:{"DET:",(I_det_full?"FULL":"NORM"),"        "};
                 3'd1:line_text={"SW4:1 R",(8'h30+{4'd0,I_counts[3:0]})," B",(8'h30+{4'd0,I_counts[7:4]})," G",(8'h30+{4'd0,I_counts[11:8]}),"  "};
                 default:line_text={"AE:",(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),
                     (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," MAX:",
@@ -64,7 +67,7 @@ module motion_event_osd #(
             endcase
         end else begin
             case(I_pix_y[6:4])
-                3'd5:line_text={"MODE:ALARM NR:",(8'h30+{6'd0,nr_frame})," "};
+                3'd5:line_text=DISPLAY_NR_AB?(I_display_nr_active?"ALARM NR:B D2   ":"ALARM NR:A ORIG "):{"MODE:ALARM NR:",(8'h30+{6'd0,nr_frame})," "};
                 3'd6:line_text={"ZONE:",zone_word," N:",event_tens,event_ones," "};
                 3'd7:line_text={"ACT:",({4'd0,I_roi_bcd[11:8]}+8'h30),
                     ({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),"         "};

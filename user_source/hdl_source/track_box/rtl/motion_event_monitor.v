@@ -23,6 +23,7 @@ module motion_event_monitor #(
     input wire [7:0] I_box_cls,
     input wire [43:0] I_box_xmin, I_box_xmax,
     input wire [39:0] I_box_ymin, I_box_ymax,
+    output reg O_scene_busy, // Broad scene change: blue-track acquisition only
     output reg O_alarm,
     output reg O_ready,
     output reg [7:0] O_events_bcd,
@@ -248,13 +249,71 @@ module motion_event_monitor #(
             end
         end
     end
+    wire global_change = global_hits>=GLOBAL_LIMIT;
+
+    // Reuse the existing noise-cleaned frame differences. Broad disturbance
+    // requires >=64 changed samples in at least THREE image quadrants;
+    // a small moving cap in one/two quadrants cannot trigger this criterion.
+    reg [6:0] scene_q0,scene_q1,scene_q2,scene_q3;
+    reg [1:0] acquisition_hold;
+    reg [1:0] scene_stat_quad;
+    reg previous_row_left_motion,scene_sample_motion;
+    reg sample_scene_move,stat_scene_move;
+    // A broad-scene sample needs a coherent 2x2 block, not only the looser
+    // pair support used by the sensitive regional/target motion features.
+    // This prevents independent high-gain grain across all quadrants from
+    // permanently suppressing blue acquisition. No extra row/frame RAM.
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            previous_row_left_motion<=0;scene_sample_motion<=0;
+            sample_scene_move<=0;stat_scene_move<=0;
+        end else begin
+            if(S_st2) begin
+                previous_row_left_motion<=previous_row_motion;
+                scene_sample_motion<=W_mot && S_prev_frame_valid &&
+                    S_dx_p2!=0 && S_dy_p2!=0 && previous_horizontal_motion &&
+                    previous_row_motion && previous_row_left_motion;
+            end
+            if(S_mot_v) sample_scene_move<=scene_sample_motion;
+            if(busy && slot==3) stat_scene_move<=sample_scene_move;
+        end
+    end
+    // Coordinates travel with stat_valid; sample_x/y may already contain
+    // the next sample when that valid reaches the counters.
+    always @(posedge I_clk)
+        if(busy && slot==3) scene_stat_quad<={sample_y>=DS_H/2,sample_x>=DS_W/2};
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin scene_q0<=0;scene_q1<=0;scene_q2<=0;scene_q3<=0;end
+        else if(I_frame_done) begin scene_q0<=0;scene_q1<=0;scene_q2<=0;scene_q3<=0;end
+        else if(stat_valid && stat_scene_move) begin
+            case(scene_stat_quad)
+                0:if(!scene_q0[6])scene_q0<=scene_q0+1'b1;
+                1:if(!scene_q1[6])scene_q1<=scene_q1+1'b1;
+                2:if(!scene_q2[6])scene_q2<=scene_q2+1'b1;
+                3:if(!scene_q3[6])scene_q3<=scene_q3+1'b1;
+            endcase
+        end
+    end
+    wire [3:0] scene_regions={scene_q3[6],scene_q2[6],scene_q1[6],scene_q0[6]};
+    wire scene_spread=(&scene_regions[2:0]) || (&scene_regions[3:1]) ||
+                      (scene_regions[3] && scene_regions[0] && (scene_regions[1] || scene_regions[2]));
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin O_scene_busy<=1;acquisition_hold<=2;end
+        else if(I_mode_change) begin O_scene_busy<=1;acquisition_hold<=2;end
+        else if(I_frame_done) begin
+            if(!S_prev_frame_valid || scene_spread || global_change) begin
+                O_scene_busy<=1;acquisition_hold<=2;
+            end else if(acquisition_hold!=0) begin
+                O_scene_busy<=1;acquisition_hold<=acquisition_hold-1'b1;
+            end else O_scene_busy<=0;
+        end
+    end
     wire red_present = (box0[36] && box0[35:34]==0) || (box1[36] && box1[35:34]==0) ||
         (box2[36] && box2[35:34]==0) || (box3[36] && box3[35:34]==0);
     wire blue_present = (box0[36] && box0[35:34]==1) || (box1[36] && box1[35:34]==1) ||
         (box2[36] && box2[35:34]==1) || (box3[36] && box3[35:34]==1);
     wire red_active = red_motion>=16'd2 && red_motion>=(red_samples>>5);
     wire blue_active = blue_motion>=16'd2 && blue_motion>=(blue_samples>>5);
-    wire global_change = global_hits>=GLOBAL_LIMIT;
 
     // Convert the latest regional activity to three decimal digits over eight
     // clocks. No division/multiplication and no long combinational BCD chain.

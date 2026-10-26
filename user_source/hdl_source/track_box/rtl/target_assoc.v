@@ -65,6 +65,7 @@ module target_assoc #(
     parameter integer DEADZONE   = 2,     // 死区：|Δ| < 2 px 不更新
     parameter integer MAX_MISS   = 5,     // 连续 5 帧无匹配 → 删框
     parameter integer MATCH_TH   = 96,
+    parameter integer SCENE_GUARD = 0, // Delay NEW blue tracks during broad scene change
     parameter integer ACQUIRE_MIN = 48, // Minimum gate for unconfirmed small tracks; confirmed tracking unchanged.    // 关联代价门限（曼哈顿域）
     parameter integer AREA_SHIFT = 8,     // 面积差缩放（>> 8）
     // ⚠ CLS_PEN 故意设得 > MATCH_TH：效果 = 「类别不同就基本不关联」。
@@ -104,6 +105,7 @@ module target_assoc #(
     input  wire        I_frame_done,
 
     // ---- 目标清单总线（冻结表 v1.8 §2）----
+    input wire I_scene_busy, // Same pixel domain, held between frame boundaries
     input  wire [2:0]  I_target_cnt,          // 本帧有效目标数（仅供参考，以槽 valid 为准）
     input  wire [96*4-1:0] I_target_bus,      // 4 槽 × 96 bit
 
@@ -387,7 +389,12 @@ module target_assoc #(
     reg        Q_callgate;             //                     新目标门控（第 2 拍寄存）
 
     wire [95:0] W_qslot = Q_slot;      // 第 2/3 拍使用的输入槽（已锁存）
-    wire        Q_in_valid = W_qslot[B_VALID] && (!CAP_FILTER || !Q_fragment);
+    // This is acquisition protection, not a whole-screen box blanker.
+    // Existing confirmed blue tracks keep their normal association/EMA/miss
+    // rules. Red/green candidates and all 2303 segmentation thresholds stay.
+    wire scene_reject=SCENE_GUARD && I_scene_busy &&
+        W_qslot[B_CLS +:2]==2'd1 && !(Q_cbest_hit && R_confirm[Q_cbj]);
+    wire        Q_in_valid = W_qslot[B_VALID] && (!CAP_FILTER || !Q_fragment) && !scene_reject;
     wire [1:0]  Q_in_cls   = W_qslot[B_CLS  +: 2];
     wire [10:0] Q_in_cx    = W_qslot[B_CX   +: 11];
     wire [9:0]  Q_in_cy    = W_qslot[B_CY   +: 10];

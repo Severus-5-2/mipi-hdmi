@@ -708,9 +708,12 @@ module design_top_wrapper (
     );
 
     //4. 四路像素选择器
-    pixel_mux_4to1 u_pixel_mux_4to1(
+    wire S_display_nr_active;
+    wire S_scene_busy;
+    pixel_mux_4to1 #(.DISPLAY_NR_AB(1),.DISPLAY_NR_FRAMES(240)) u_pixel_mux_4to1(
         .clk     (S_hdmi_pixel_clk),
         .rst_n   (S_hdmi_rst_n),
+        .I_de(S_hdmi_de),.I_frame(S_frame_done),.O_display_nr_active(S_display_nr_active),
         .mode    (S_mode_sel),
         .rgb0    (S_video_sat),       // 彩色原图：经饱和度增强（其余分支不受影响）
         .rgb1    (S_rgb_gray),
@@ -1215,10 +1218,11 @@ isp_top u_isp_top (
     //    ⚠ 三者的 I_frame_done 全部接 S_det_fdone（与总线锁存同源 ⇒ 早 0 拍，
     //      绝不会落进冻结表 §1.1 说的"中间地带"）
     //==================================================================
-    target_assoc #(.ACQUIRE_MIN(16), .CAP_FILTER(1), .MAX_MISS(5), .EMA_SHIFT(1), .MATCH_TH(144), .CLS_PEN(256)) u_target_assoc (
+    target_assoc #(.SCENE_GUARD(1), .ACQUIRE_MIN(16), .CAP_FILTER(1), .MAX_MISS(5), .EMA_SHIFT(1), .MATCH_TH(144), .CLS_PEN(256)) u_target_assoc (
         .I_clk         ( S_hdmi_pixel_clk ),
         .I_rst_n       ( S_hdmi_rst_n     ),
         .I_frame_done  ( S_det_fdone      ),
+        .I_scene_busy(S_scene_busy),
         .I_target_cnt  ( S_color_tracking_active ? S_target_cnt : 3'd0 ),
         .I_target_bus  ( S_tracking_bus   ),
         .O_box_valid   ( S_box_valid      ),
@@ -1266,6 +1270,7 @@ isp_top u_isp_top (
         .I_box_valid(S_color_box_valid), .I_box_cls(S_box_cls),
         .I_box_xmin(S_box_xmin), .I_box_xmax(S_box_xmax),
         .I_box_ymin(S_box_ymin), .I_box_ymax(S_box_ymax),
+        .O_scene_busy(S_scene_busy),
         .O_alarm(S_event_alarm), .O_ready(S_event_ready),
         .O_events_bcd(S_event_count),
         .O_roi_bcd(S_roi_activity_bcd),
@@ -1281,13 +1286,14 @@ isp_top u_isp_top (
     end else begin:g_no_field_diag
         assign S_field_bcd=360'd0;assign S_field_ready=2'd0;
     end endgenerate
-    motion_event_osd #(
+    motion_event_osd #(.DISPLAY_NR_AB(1),
         .ROI_X0(ALARM_X0), .ROI_X1(ALARM_X1),
         .ROI_Y0(ALARM_Y0), .ROI_Y1(ALARM_Y1)
     )u_motion_event_osd(
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
-        .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),.I_ae_quality_status(S_ae_quality_status),
+        .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),
+        .I_display_nr_active(S_display_nr_active),.I_scene_busy(S_scene_busy),.I_ae_quality_status(S_ae_quality_status),
         .I_cal_enable(FIELD_METER_DIAG),.I_cal_bcd(S_field_bcd),.I_cal_ready(S_field_ready),
         .I_alarm(S_event_alarm), .I_ready(S_event_ready),
         .I_events_bcd(S_event_count),
