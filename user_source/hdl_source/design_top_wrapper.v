@@ -710,7 +710,7 @@ module design_top_wrapper (
     //4. 四路像素选择器
     wire S_display_nr_active;
     wire S_scene_busy;
-    pixel_mux_4to1 #(.DISPLAY_NR_AB(1),.DISPLAY_NR_FRAMES(240)) u_pixel_mux_4to1(
+    pixel_mux_4to1 #(.DISPLAY_NR_AB(0),.DISPLAY_NR_FRAMES(240)) u_pixel_mux_4to1(
         .clk     (S_hdmi_pixel_clk),
         .rst_n   (S_hdmi_rst_n),
         .I_de(S_hdmi_de),.I_frame(S_frame_done),.O_display_nr_active(S_display_nr_active),

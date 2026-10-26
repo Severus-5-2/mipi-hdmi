@@ -75,7 +75,13 @@ module motion_event_monitor #(
     reg [7:0]  S_rdata;
     // One 320-bit ROW of previous motion flags suppresses isolated changed
     // samples. This is independent of the existing previous-frame gray RAM.
-    reg line_motion [0:DS_W-1];
+    // bit0 preserves the existing alarm/target-motion flag exactly.
+    // bits3:1 count a same-column changed run (0..5) in THIS frame.
+    // One small embedded row, no frame buffer; row zero ignores old RAM tags.
+    (* ram_style="bram" *) reg [3:0] line_motion [0:DS_W-1];
+    reg [2:0] previous_vertical_run;
+    wire [2:0] vertical_run_next=(!W_mot || !S_prev_frame_valid)?3'd0:
+        (S_dy_p2==0)?3'd1:(previous_vertical_run>=5)?3'd5:previous_vertical_run+3'd1;
     reg previous_row_motion;
     reg previous_horizontal_motion;
 
@@ -123,8 +129,11 @@ module motion_event_monitor #(
     reg [7:0]   S_dy_p2;
 
     always @(posedge I_clk) begin
-        if(S_st1) previous_row_motion<=line_motion[S_dx_l];
-        if(S_st2) line_motion[S_dx_p2]<=W_mot && S_prev_frame_valid;
+        if(S_st1) begin
+            previous_row_motion<=line_motion[S_dx_l][0];
+            previous_vertical_run<=line_motion[S_dx_l][3:1];
+        end
+        if(S_st2) line_motion[S_dx_p2]<={vertical_run_next,W_mot && S_prev_frame_valid};
     end
 
     always @(posedge I_clk or negedge I_rst_n) begin
@@ -258,21 +267,27 @@ module motion_event_monitor #(
     reg [1:0] acquisition_hold;
     reg [1:0] scene_stat_quad;
     reg previous_row_left_motion,scene_sample_motion;
+    reg [3:0] scene_horizontal_run;
     reg sample_scene_move,stat_scene_move;
-    // A broad-scene sample needs a coherent 2x2 block, not only the looser
-    // pair support used by the sensitive regional/target motion features.
-    // This prevents independent high-gain grain across all quadrants from
-    // permanently suppressing blue acquisition. No extra row/frame RAM.
+    // Keep the 2x2 support and also accept thin, extended moving edges:
+    // six vertical samples or twelve horizontal samples. Slow pans often
+    // change only one DS column/row and otherwise never form a 2x2 block.
+    // Long runs, rather than pair support alone, limit static-grain triggers.
+    // These are acquisition-only statistics: alarm/color motion is unchanged.
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
-            previous_row_left_motion<=0;scene_sample_motion<=0;
+            previous_row_left_motion<=0;scene_sample_motion<=0;scene_horizontal_run<=0;
             sample_scene_move<=0;stat_scene_move<=0;
         end else begin
             if(S_st2) begin
                 previous_row_left_motion<=previous_row_motion;
-                scene_sample_motion<=W_mot && S_prev_frame_valid &&
-                    S_dx_p2!=0 && S_dy_p2!=0 && previous_horizontal_motion &&
-                    previous_row_motion && previous_row_left_motion;
+                scene_horizontal_run<=(!W_mot || !S_prev_frame_valid)?4'd0:
+                    (S_dx_p2==0)?4'd1:(scene_horizontal_run>=11)?4'd11:scene_horizontal_run+4'd1;
+                scene_sample_motion<=W_mot && S_prev_frame_valid && (
+                    (S_dx_p2!=0 && S_dy_p2!=0 && previous_horizontal_motion &&
+                     previous_row_motion && previous_row_left_motion) ||
+                    (S_dy_p2>=5 && previous_vertical_run>=5) ||
+                    (S_dx_p2>=11 && scene_horizontal_run>=11));
             end
             if(S_mot_v) sample_scene_move<=scene_sample_motion;
             if(busy && slot==3) stat_scene_move<=sample_scene_move;
