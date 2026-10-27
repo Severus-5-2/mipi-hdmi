@@ -203,3 +203,54 @@ module video_in (
 
     
 endmodule
+
+// Observe the existing write stream without altering page rotation or data.
+// Publish only after all ordered words of a page reached the MC command port.
+// Invalidate on the first ENQUEUED overwrite, before that overwrite reaches MC.
+module tnr_page_monitor #(parameter FRAME_WORDS=172800)(
+ input wire clk,rst_n,I_settings_busy,
+ input wire I_enqueue_write,input wire [24:0] I_enqueue_addr,
+ input wire I_mc_write,input wire [24:0] I_mc_addr,
+ output reg [3:0] O_complete,output reg [31:0] O_generation
+);
+function [1:0] page;
+ input [24:0] a;
+ begin page=(a>=21000000)?3:(a>=14000000)?2:(a>=7000000)?1:0;end
+endfunction
+function [24:0] base;
+ input [1:0] p;
+ begin case(p)0:base=0;1:base=7000000;2:base=14000000;3:base=21000000;endcase end
+endfunction
+reg [17:0] count;
+reg [1:0] writing_page;
+wire [24:0] next_addr=base(writing_page)+{4'b0,count,3'b0};
+
+reg sequence_good;
+reg [7:0] serial,generation;
+reg [1:0] settings_warm;
+wire [1:0] mc_page=page(I_mc_addr),enqueue_page=page(I_enqueue_addr);
+wire is_first=I_mc_addr==base(mc_page);
+always @(posedge clk or negedge rst_n)begin
+ if(!rst_n)begin
+  O_complete<=0;O_generation<=0;count<=0;writing_page<=0;
+  sequence_good<=0;serial<=0;generation<=0;settings_warm<=2;
+ end else if(I_settings_busy)begin O_complete<=0;sequence_good<=0;settings_warm<=2;end
+ else begin
+  if(I_mc_write)begin
+   if(is_first)begin
+    O_complete[mc_page]<=0;count<=1;
+    writing_page<=mc_page;sequence_good<=settings_warm==0;serial<=serial+1'b1;generation<=serial+1'b1;
+    if(settings_warm!=0)settings_warm<=settings_warm-1'b1;
+   end else if(sequence_good && mc_page==writing_page && I_mc_addr==next_addr)begin
+    if(count==FRAME_WORDS-1)begin
+     O_complete[writing_page]<=1;O_generation[writing_page*8 +:8]<=generation;
+     sequence_good<=0;
+    end else count<=count+1'b1;
+   end else begin sequence_good<=0;O_complete[mc_page]<=0;end
+  end
+  // Queue-side invalidation wins over a same-cycle publication. This is
+  // conservative on startup or a truncated/corrupted camera frame.
+  if(I_enqueue_write)O_complete[enqueue_page]<=0;
+ end
+end
+endmodule

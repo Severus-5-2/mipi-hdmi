@@ -985,7 +985,28 @@ isp_top u_isp_top (
 
     assign S_video_out_rst_n = S_hdmi_rst_n;
 
-    video_out u_video_out(
+    wire [3:0] S_tnr_page_complete;
+    wire [31:0] S_tnr_page_generation;
+    wire S_tnr_used,S_tnr_fault;
+    reg [1:0] S_tnr_cfg_sync,S_tnr_used_sync,S_tnr_fault_sync;
+    reg [3:0] S_tnr_pages_meta,S_tnr_pages_sync;
+    always @(posedge S_ddr_clk or negedge S_rst_n)
+        if(!S_rst_n)S_tnr_cfg_sync<=0;else S_tnr_cfg_sync<={S_tnr_cfg_sync[0],S_ae_req};
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n)
+        if(!S_hdmi_rst_n)begin S_tnr_used_sync<=0;S_tnr_fault_sync<=0;S_tnr_pages_meta<=0;S_tnr_pages_sync<=0;end
+        else begin
+            S_tnr_used_sync<={S_tnr_used_sync[0],S_tnr_used};S_tnr_fault_sync<={S_tnr_fault_sync[0],S_tnr_fault};
+            S_tnr_pages_meta<=S_tnr_page_complete;S_tnr_pages_sync<=S_tnr_pages_meta;
+        end
+    tnr_page_monitor u_tnr_page_monitor(
+        .clk(S_ddr_clk),.rst_n(S_rst_n),.I_settings_busy(S_tnr_cfg_sync[1]),
+        .I_enqueue_write(S_vi_ddr_wr_en),.I_enqueue_addr(S_vi_ddr_wr_addr),
+        .I_mc_write(S_mc_app_en && S_mc_app_wdf_wren),.I_mc_addr(S_mc_app_addr),
+        .O_complete(S_tnr_page_complete),.O_generation(S_tnr_page_generation));
+    video_out #(.TEMPORAL_NR(1)) u_video_out(
+        .I_controller_rst_n(S_rst_n),.I_writer_en(S_vi_ddr_wr_en),.I_writer_addr(S_vi_ddr_wr_addr),
+        .I_page_complete(S_tnr_page_complete),.I_page_generation(S_tnr_page_generation),
+        .O_tnr_used(S_tnr_used),.O_tnr_fault(S_tnr_fault),
         .I_rst_n             ( S_video_out_rst_n    ),
         .I_ddr_clk           ( S_ddr_clk            ),
  
@@ -1218,7 +1239,7 @@ isp_top u_isp_top (
     //    ⚠ 三者的 I_frame_done 全部接 S_det_fdone（与总线锁存同源 ⇒ 早 0 拍，
     //      绝不会落进冻结表 §1.1 说的"中间地带"）
     //==================================================================
-    target_assoc #(.SCENE_GUARD(1), .ACQUIRE_MIN(16), .CAP_FILTER(1), .MAX_MISS(5), .EMA_SHIFT(1), .MATCH_TH(144), .CLS_PEN(256)) u_target_assoc (
+    target_assoc #(.SERIAL_COST(1), .SCENE_GUARD(1), .ACQUIRE_MIN(16), .CAP_FILTER(1), .MAX_MISS(5), .EMA_SHIFT(1), .MATCH_TH(144), .CLS_PEN(256)) u_target_assoc (
         .I_clk         ( S_hdmi_pixel_clk ),
         .I_rst_n       ( S_hdmi_rst_n     ),
         .I_frame_done  ( S_det_fdone      ),
@@ -1293,7 +1314,7 @@ isp_top u_isp_top (
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
         .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),
-        .I_display_nr_active(S_display_nr_active),.I_scene_busy(S_scene_busy),.I_ae_quality_status(S_ae_quality_status),
+        .I_display_nr_active(S_tnr_used_sync[1]),.I_tnr_pages(S_tnr_pages_sync),.I_tnr_fault(S_tnr_fault_sync[1]),.I_scene_busy(S_scene_busy),.I_ae_quality_status(S_ae_quality_status),
         .I_cal_enable(FIELD_METER_DIAG),.I_cal_bcd(S_field_bcd),.I_cal_ready(S_field_ready),
         .I_alarm(S_event_alarm), .I_ready(S_event_ready),
         .I_events_bcd(S_event_count),

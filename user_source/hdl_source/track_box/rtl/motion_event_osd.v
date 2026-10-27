@@ -12,6 +12,7 @@ module motion_event_osd #(
     input wire [11:0] I_counts,
     input wire [1:0] I_nr_level,
     input wire I_scene_busy,
+    input wire [3:0] I_tnr_pages,input wire I_tnr_fault,
     input wire I_display_nr_active, // Same pixel domain; phase held for a complete frame
     input wire [27:0] I_ae_quality_status,
     input wire I_cal_enable,
@@ -40,6 +41,8 @@ module motion_event_osd #(
                 nr_frame<=nr_sync;
         end
     end
+    wire [7:0] tnr_page_hex=(I_tnr_pages<10)?8'h30+I_tnr_pages:8'h41+(I_tnr_pages-10);
+    wire [7:0] tnr_state=I_tnr_fault?"E":I_display_nr_active?"1":"0";
     function [39:0] state_word;
         input [1:0] state;
         begin
@@ -56,7 +59,7 @@ module motion_event_osd #(
     always @* begin
         if(I_color_mode) begin
             case(I_pix_y[6:4])
-                3'd5:line_text=DISPLAY_NR_AB?(I_display_nr_active?"COLOR NR:B D2   ":"COLOR NR:A ORIG "):{"MODE:COLOR NR:",(8'h30+{6'd0,nr_frame})," "}; // y=592
+                3'd5:line_text=DISPLAY_NR_AB?{"COLOR TNR:",tnr_state," P:",tnr_page_hex," "}:{"MODE:COLOR NR:",(8'h30+{6'd0,nr_frame})," "}; // y=592
                 3'd6:line_text={"RED :",state_word(I_red_state),"      "};
                 3'd7:line_text={"BLUE:",state_word(I_blue_state),"      "};
                 3'd0:line_text=DISPLAY_NR_AB?{"DET:",(I_det_full?"FULL":"NORM")," SCN:",(I_scene_busy?"1":"0"),"  "}:{"DET:",(I_det_full?"FULL":"NORM"),"        "};
@@ -67,7 +70,7 @@ module motion_event_osd #(
             endcase
         end else begin
             case(I_pix_y[6:4])
-                3'd5:line_text=DISPLAY_NR_AB?(I_display_nr_active?"ALARM NR:B D2   ":"ALARM NR:A ORIG "):{"MODE:ALARM NR:",(8'h30+{6'd0,nr_frame})," "};
+                3'd5:line_text=DISPLAY_NR_AB?{"ALARM TNR:",tnr_state," P:",tnr_page_hex," "}:{"MODE:ALARM NR:",(8'h30+{6'd0,nr_frame})," "};
                 3'd6:line_text={"ZONE:",zone_word," N:",event_tens,event_ones," "};
                 3'd7:line_text={"ACT:",({4'd0,I_roi_bcd[11:8]}+8'h30),
                     ({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),"         "};

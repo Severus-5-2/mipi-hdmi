@@ -65,6 +65,7 @@ module target_assoc #(
     parameter integer DEADZONE   = 2,     // 死区：|Δ| < 2 px 不更新
     parameter integer MAX_MISS   = 5,     // 连续 5 帧无匹配 → 删框
     parameter integer MATCH_TH   = 96,
+    parameter integer SERIAL_COST = 0, // Share the four cost calculations over four clocks.
     parameter integer SCENE_GUARD = 0, // Delay NEW blue tracks during broad scene change
     parameter integer ACQUIRE_MIN = 48, // Minimum gate for unconfirmed small tracks; confirmed tracking unchanged.    // 关联代价门限（曼哈顿域）
     parameter integer AREA_SHIFT = 8,     // 面积差缩放（>> 8）
@@ -182,6 +183,7 @@ module target_assoc #(
                      ST_FIN   = 3'd2,   // 未匹配轨迹：miss++ / 超时删除
                      ST_OUT   = 3'd3;   // 工作区 → 输出寄存器
 
+    reg [1:0] S_cost_j;
     reg [2:0] S_st;
     reg [2:0] S_i;                     // 当前处理的输入槽号
     reg [3:0] S_arm;                    // ★ 帧脉冲后的等待计数
@@ -268,6 +270,64 @@ module target_assoc #(
     reg [19:0] C_d;
     integer    mi;
 
+    generate if(SERIAL_COST)begin:g_serial_cost
+    integer ci;
+    always @(*) begin
+        // 组合：4 条轨迹的预测位置 + 代价（与旧版逐 ci 完全同式）
+        C_prx = 11'd0;
+        C_pry = 10'd0;
+        C_spx = 14'sd0;
+        C_spy = 14'sd0;
+        C_cost = 13'd0;
+        C_d    = 20'd0;
+        P_cost  = {4{13'h1FFF}}; P_gate={4{MATCH_TH[12:0]}}; C_gate=13'd16;
+        P_valid=0;P_free=0;
+        ci={30'd0,S_cost_j};
+        begin
+            C_gate={1'b0,R_radius_x[ci*11 +: 11],1'b0}+{1'b0,R_radius_y[ci*11 +: 11],1'b0};
+            if(C_gate<ACQUIRE_MIN) C_gate=ACQUIRE_MIN;
+            if(C_gate>96) C_gate=96;
+            if(C_gate>MATCH_TH) C_gate=MATCH_TH;
+            P_gate[ci*13 +: 13]=(!CAP_FILTER || R_confirm[ci])?MATCH_TH[12:0]:C_gate;
+            P_valid[ci] = R_tv[ci];
+            P_free [ci] = !S_taken[ci];
+            if (R_tv[ci]) begin
+                // ---- 预测位置 = 上次原始位置 + 速度（1 帧外推），并夹到画面内 ----
+                C_spx = $signed({3'b000, R_tpx[ci*W_CXW +: W_CXW]}) +
+                        $signed(R_tvx[ci*W_VEW +: W_VEW]);
+                C_prx = C_spx[13] ? 11'd0 :
+                        (|C_spx[12:11] ? 11'd2047 : C_spx[10:0]);
+
+                C_spy = $signed({3'b000, R_tpy[ci*W_CYW +: W_CYW]}) +
+                        $signed(R_tvy[ci*W_VEW +: W_VEW]);
+                C_pry = C_spy[13] ? 10'd0 :
+                        (|C_spy[12:10] ? 10'd1023 : C_spy[9:0]);
+
+                // ---- |Δcx| ----
+                if (W_in_cx >= C_prx) C_cost = W_in_cx - C_prx;
+                else                  C_cost = C_prx - W_in_cx;
+                // ---- + |Δcy| ----
+                if (W_in_cy >= C_pry) C_d = W_in_cy - C_pry;
+                else                  C_d = C_pry - W_in_cy;
+                C_cost = C_cost + C_d[9:0];
+                // ---- + (|Δarea| >> AREA_SHIFT) ----
+                if (W_in_area >= R_tarea[ci*W_ARW +: W_ARW])
+                    C_d = W_in_area - R_tarea[ci*W_ARW +: W_ARW];
+                else
+                    C_d = R_tarea[ci*W_ARW +: W_ARW] - W_in_area;
+                // Cap area penalty: approaching the camera changes area quickly,
+                // even when the same object's center remains stationary.
+                C_cost = C_cost + ((CAP_FILTER && C_d[19:AREA_SHIFT] > 32) ? 13'd32 : C_d[19:AREA_SHIFT]);
+                // ---- + 类别惩罚 ----
+                if (W_in_cls != R_tcls[ci*2 +: 2])
+                    C_cost = C_cost + CLS_PEN[12:0];
+
+                P_cost[ci*13 +: 13] = C_cost;   // ★ 本拍末寄存，供下一拍做最小选择
+            end
+        end
+    end
+
+    end else begin:g_parallel_cost
     always @(*) begin
         // 组合：4 条轨迹的预测位置 + 代价（与旧版逐 mi 完全同式）
         C_prx = 11'd0;
@@ -320,6 +380,8 @@ module target_assoc #(
             end
         end
     end
+
+    end endgenerate
 
     // ---- 第 2 拍：对已寄存的 4 个代价做最小选择（组合）----
     //  ⚠⚠ 2026-10-15 修正：本段原先读的是 **组合的 `P_cost`/`P_valid`/`P_free`**，
@@ -506,6 +568,7 @@ module target_assoc #(
     //==================================================================
     always @(posedge I_clk or negedge I_rst_n) begin
         if (!I_rst_n) begin
+            S_cost_j <=0;
             S_st     <= ST_IDLE;
             S_i      <= 3'd0;
             S_taken  <= 4'd0;
@@ -568,11 +631,19 @@ module target_assoc #(
             ST_COST: begin
                 Q_slot <= W_slot;              // 锁存本槽，供 SEL/UPD 两拍使用
                 Q_fragment <= !W_size_ok;
+                if(SERIAL_COST)begin
+                    Q_gate[S_cost_j*13 +:13]<=P_gate[S_cost_j*13 +:13];
+                    Q_cost[S_cost_j*13 +:13]<=P_cost[S_cost_j*13 +:13];
+                    Q_pv[S_cost_j]<=P_valid[S_cost_j];Q_pf[S_cost_j]<=P_free[S_cost_j];
+                    if(S_cost_j==3)begin S_cost_j<=0;S_st<=ST_SEL;end
+                    else S_cost_j<=S_cost_j+1'b1;
+                end else begin
                 Q_gate<=P_gate;
                 Q_cost <= P_cost;              // 4 条轨迹代价打拍（整向量）
                 Q_pv   <= P_valid;             // 有效性/占用性同步打拍
                 Q_pf   <= P_free;
                 S_st   <= ST_SEL;
+                end
             end
 
             //----------------------------------------------------------
@@ -662,13 +733,29 @@ module target_assoc #(
                     else R_tmiss[F_j*W_MSW +: W_MSW]<=
                         R_tmiss[F_j*W_MSW +: W_MSW]+3'd1;
                 end
-                if(S_i==3'd3) S_st<=ST_OUT;
+                if(S_i==3'd3)begin S_st<=ST_OUT;if(SERIAL_COST)S_i<=0;end
                 else S_i<=S_i+3'd1;
             end
 
             //----------------------------------------------------------
             // 工作区 → 输出寄存器（原子更新，帧内不再抖动）
             ST_OUT: begin
+                if(SERIAL_COST)begin
+                    O_box_cls[F_j*2 +:2]<=R_tcls[F_j*2 +:2];
+                    if(!CAP_FILTER || !R_hold_shape[F_j] || !O_box_valid[F_j])begin
+                        O_box_xmin[F_j*11 +:11]<=radius_lo(R_tcx[F_j*11 +:11],R_radius_x[F_j*11 +:11]);
+                        O_box_xmax[F_j*11 +:11]<=radius_hi(R_tcx[F_j*11 +:11],R_radius_x[F_j*11 +:11],11'd1279);
+                        O_box_ymin[F_j*10 +:10]<=radius_lo({1'b0,R_tcy[F_j*10 +:10]},R_radius_y[F_j*11 +:11]);
+                        O_box_ymax[F_j*10 +:10]<=radius_hi({1'b0,R_tcy[F_j*10 +:10]},R_radius_y[F_j*11 +:11],11'd719);
+                    end
+                    O_box_cx[F_j*11 +:11]<=R_tcx[F_j*11 +:11];O_box_cy[F_j*10 +:10]<=R_tcy[F_j*10 +:10];
+                    if(S_i==3)begin
+                        O_box_valid<=W_visible;
+                        O_track_cnt<={2'b00,W_visible[0]}+{2'b00,W_visible[1]}+{2'b00,W_visible[2]}+{2'b00,W_visible[3]};
+                        S_st<=ST_IDLE;
+                    end else S_i<=S_i+1'b1;
+                end else begin
+
                 O_box_valid[0]         <= W_visible[0];
                 O_box_valid[1]         <= W_visible[1];
                 O_box_valid[2]         <= W_visible[2];
@@ -720,6 +807,7 @@ module target_assoc #(
                 O_track_cnt <= {2'b00, W_visible[0]} + {2'b00, W_visible[1]} +
                                {2'b00, W_visible[2]} + {2'b00, W_visible[3]};
                 S_st        <= ST_IDLE;
+                end
             end
 
             default: S_st <= ST_IDLE;
