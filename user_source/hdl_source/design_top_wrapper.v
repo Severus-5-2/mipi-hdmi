@@ -606,6 +606,7 @@ module design_top_wrapper (
         .IMG_WIDTH (1280  ),   // 必须与视频时序的行像素数一致，否则行缓存会错位
         .ADDR_W    (12    ),
         .NR_MODE   (2     ),
+        .FLAT_LUMA_NR(1    ), // Dark flat-region luma mean, no additional spatial delay
         .LUMA_NR   (1     ),   // 2:完整3×3；1:仅水平（不占BRAM）；0:旁路
         .NR_EN     (1     )    // 1:启用；0:直通（A/B 对比用）
     ) u_chroma_denoise(

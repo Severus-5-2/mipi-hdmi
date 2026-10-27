@@ -1,3 +1,5 @@
+// 2026-10-27: optional dark flat-region luma averaging; original pixel/row alignment.
+// FLAT_LUMA_NR=0 retains the 1903 arithmetic; chroma is identical in both modes.
 // 2026-10-25: restore 1325 H3 arithmetic; frame/line tags clamp missing neighbors.
 // Frame tags reset during vsync; row RAM, DSP arithmetic and clock latency retained.
 //============================================================================
@@ -86,6 +88,7 @@ module chroma_denoise #(
     parameter        IMG_WIDTH = 1280,   // 一行像素数，必须与视频时序一致
     parameter        ADDR_W    = 12,     // 列地址位宽
     parameter [1:0]  NR_MODE   = 2'd2,   // 0:旁路  1:仅水平  2:完整3×3
+    parameter        FLAT_LUMA_NR = 1'b0, // Dark low-contrast mean; original geometry and chroma retained.
     parameter        LUMA_NR   = 1'b0, // Median horizontal + edge-limited vertical, no extra row RAM.
     parameter        NR_EN     = 1'b1    // 总开关：1 启用；0 直通
 ) (
@@ -213,7 +216,15 @@ module chroma_denoise #(
                               ((a>c)?a:((b>c)?c:b));
         end
     endfunction
-    wire [7:0] h_y_clean=median3(yl,yc,s1_y);
+    // Gaussian grain is not removed efficiently by a horizontal median alone.
+    // On dark low-contrast triplets use a rounded [1 2 1]/4 mean. Keep the
+    // original median at stronger edges and in bright areas. No extra pixel
+    // delay, row RAM, temporal state, or change to Cb/Cr arithmetic.
+    wire [7:0] h_left_delta=(yl>=yc)?yl-yc:yc-yl;
+    wire [7:0] h_right_delta=(s1_y>=yc)?s1_y-yc:yc-s1_y;
+    wire h_flat=FLAT_LUMA_NR && yc<160 && h_left_delta<=48 && h_right_delta<=48;
+    wire [9:0] h_y_mean={2'b00,yl}+{1'b0,yc,1'b0}+{2'b00,s1_y}+10'd2;
+    wire [7:0] h_y_clean=h_flat?h_y_mean[9:2]:median3(yl,yc,s1_y);
 
     //========================================================================
     // 级 2 寄存器：打包成 24bit 总线 {Y, Cr, Cb} 供后续行延时使用
@@ -337,9 +348,11 @@ module chroma_denoise #(
     wire [7:0] y_dn=cur_y_aligned;
     wire [7:0] y_up_delta=(y_up>=p1_y)?y_up-p1_y:p1_y-y_up;
     wire [7:0] y_dn_delta=(y_dn>=p1_y)?y_dn-p1_y:p1_y-y_dn;
-    // Preserve edges: replace a neighbor by the center when contrast >24.
-    wire [7:0] y_up_safe=(y_up_delta<=24)?y_up:p1_y;
-    wire [7:0] y_dn_safe=(y_dn_delta<=24)?y_dn:p1_y;
+    // Dark grain can cross the original 24-level veto after Gamma. Widen
+    // only the dark range; each stronger vertical edge retains its center.
+    wire [7:0] y_limit=(FLAT_LUMA_NR && p1_y<160)?8'd48:8'd24;
+    wire [7:0] y_up_safe=(y_up_delta<=y_limit)?y_up:p1_y;
+    wire [7:0] y_dn_safe=(y_dn_delta<=y_limit)?y_dn:p1_y;
     wire [9:0] y_vertical={2'd0,y_up_safe}+{1'b0,p1_y,1'b0}+{2'd0,y_dn_safe}+10'd2;
     reg [7:0] v_y, v_cb, v_cr;      // NR_MODE 决定来源，故用 reg 在 generate 之外声明
 
