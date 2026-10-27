@@ -13,7 +13,8 @@ module motion_event_osd #(
     input wire [1:0] I_nr_level,
     input wire I_scene_busy,
     input wire [3:0] I_tnr_pages,input wire I_tnr_fault,
-    input wire I_display_nr_active, // Same pixel domain; phase held for a complete frame
+    input wire [7:0] I_tnr_statistics, // Frame-held source, synchronized by TOP
+    input wire I_display_nr_active, // Previous complete display epoch had any averaging
     input wire [27:0] I_ae_quality_status,
     input wire I_cal_enable,
     input wire [359:0] I_cal_bcd,
@@ -41,6 +42,18 @@ module motion_event_osd #(
                 nr_frame<=nr_sync;
         end
     end
+    // Accept stable multi-bit statistics only at the visible frame boundary.
+    reg [7:0] statistics_prev,statistics_frame;
+    always @(posedge I_clk or negedge I_rst_n)begin
+        if(!I_rst_n)begin statistics_prev<=0;statistics_frame<=0;end
+        else begin
+            statistics_prev<=I_tnr_statistics;
+            if(I_de && I_pix_x==0 && I_pix_y==0 && statistics_prev==I_tnr_statistics)
+                statistics_frame<=I_tnr_statistics;
+        end
+    end
+    wire [7:0] valid_digit=8'h30+{4'd0,statistics_frame[7:4]};
+    wire [7:0] average_digit=8'h30+{4'd0,statistics_frame[3:0]};
     wire [7:0] tnr_page_hex=(I_tnr_pages<10)?8'h30+I_tnr_pages:8'h41+(I_tnr_pages-10);
     wire [7:0] tnr_state=I_tnr_fault?"E":I_display_nr_active?"1":"0";
     function [39:0] state_word;
@@ -59,23 +72,23 @@ module motion_event_osd #(
     always @* begin
         if(I_color_mode) begin
             case(I_pix_y[6:4])
-                3'd5:line_text=DISPLAY_NR_AB?{"COLOR TNR:",tnr_state," P:",tnr_page_hex," "}:{"MODE:COLOR NR:",(8'h30+{6'd0,nr_frame})," "}; // y=592
+                3'd5:line_text=DISPLAY_NR_AB?{"COL TNR:",tnr_state," V",valid_digit," A",average_digit," "}:{"MODE:COLOR NR:",(8'h30+{6'd0,nr_frame})," "}; // y=592
                 3'd6:line_text={"RED :",state_word(I_red_state),"      "};
                 3'd7:line_text={"BLUE:",state_word(I_blue_state),"      "};
                 3'd0:line_text=DISPLAY_NR_AB?{"DET:",(I_det_full?"FULL":"NORM")," SCN:",(I_scene_busy?"1":"0"),"  "}:{"DET:",(I_det_full?"FULL":"NORM"),"        "};
-                3'd1:line_text={"SW4:1 R",(8'h30+{4'd0,I_counts[3:0]})," B",(8'h30+{4'd0,I_counts[7:4]})," G",(8'h30+{4'd0,I_counts[11:8]}),"  "};
+                3'd1:line_text={"SW4:1 R",(8'h30+{4'd0,I_counts[3:0]}),"B",(8'h30+{4'd0,I_counts[7:4]}),"G",(8'h30+{4'd0,I_counts[11:8]})," P:",tnr_page_hex};
                 default:line_text={"AE:",(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),
                     (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," MAX:",
                     (8'h30+{4'd0,qs_frame[27:24]}),(8'h30+{4'd0,qs_frame[23:20]}),(8'h30+{4'd0,qs_frame[19:16]})," "};
             endcase
         end else begin
             case(I_pix_y[6:4])
-                3'd5:line_text=DISPLAY_NR_AB?{"ALARM TNR:",tnr_state," P:",tnr_page_hex," "}:{"MODE:ALARM NR:",(8'h30+{6'd0,nr_frame})," "};
+                3'd5:line_text=DISPLAY_NR_AB?{"ALM TNR:",tnr_state," V",valid_digit," A",average_digit," "}:{"MODE:ALARM NR:",(8'h30+{6'd0,nr_frame})," "};
                 3'd6:line_text={"ZONE:",zone_word," N:",event_tens,event_ones," "};
                 3'd7:line_text={"ACT:",({4'd0,I_roi_bcd[11:8]}+8'h30),
                     ({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),"         "};
                 3'd0:line_text="AUTO:CLEAR      ";
-                3'd1:line_text="SW4:0           ";
+                3'd1:line_text={"SW4:0 P:",tnr_page_hex,"       "};
                 default:line_text={"AE:",(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),
                     (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," MAX:",
                     (8'h30+{4'd0,qs_frame[27:24]}),(8'h30+{4'd0,qs_frame[23:20]}),(8'h30+{4'd0,qs_frame[19:16]})," "};
@@ -181,6 +194,7 @@ module motion_event_osd #(
             8'h4d:font=35'b10001110111010110101100011000110001; // M
             8'h4e:font=35'b10001110011010110011100011000110001; // N
             8'h4f:font=35'b01110100011000110001100011000101110; // O
+            8'h50:font=35'b11110100011000111110100001000010000; // P
             8'h52:font=35'b11110100011000111110101001001010001; // R
             8'h53:font=35'b01111100001000001110000010000111110; // S
             8'h54:font=35'b11111001000010000100001000010000100; // T

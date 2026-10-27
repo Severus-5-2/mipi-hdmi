@@ -5,7 +5,7 @@ module video_out #(parameter TEMPORAL_NR=0,parameter FRAME_WORDS=172800)(
     input wire I_controller_rst_n,
     input wire I_writer_en,input wire [24:0] I_writer_addr,
     input wire [3:0] I_page_complete,input wire [31:0] I_page_generation,
-    output wire O_tnr_used,output wire O_tnr_fault,
+    output wire O_tnr_used,output wire O_tnr_fault,output wire [7:0] O_tnr_statistics,
     input wire        I_rst_n,
 
     input wire        I_ddr_clk,
@@ -99,7 +99,7 @@ module video_out #(parameter TEMPORAL_NR=0,parameter FRAME_WORDS=172800)(
             .I_page(I_video_out_rp),.I_complete(I_page_complete),.I_generation(I_page_generation),
             .I_fifo_used(S_fifo_wr_num),.O_busy(O_video_out_rd_busy),.O_read(O_ddr_user_rd_en),.O_addr(O_ddr_user_addr),
             .I_ready(I_ddr_user_ready),.I_rd_valid(I_ddr_user_rd_valid),.I_rd_data(I_ddr_user_rd_data),
-            .O_valid(fifo_push),.O_data(fifo_data),.O_used(O_tnr_used),.O_fault(reader_fault));
+            .O_valid(fifo_push),.O_data(fifo_data),.O_used(O_tnr_used),.O_statistics(O_tnr_statistics),.O_fault(reader_fault));
     end else begin:g_legacy
     reg [24:0] legacy_addr;
     /*
@@ -163,7 +163,7 @@ module video_out #(parameter TEMPORAL_NR=0,parameter FRAME_WORDS=172800)(
 
     assign O_ddr_user_addr=legacy_addr;
     assign fifo_push=I_ddr_user_rd_valid;assign fifo_data=I_ddr_user_rd_data;
-    assign O_tnr_used=0;assign O_tnr_fault=0;
+    assign O_tnr_used=0;assign O_tnr_fault=0;assign O_tnr_statistics=0;
     end endgenerate
 
     w128_d512_fifo U_w128_d512_fifo(
@@ -352,7 +352,7 @@ module tnr_video_reader #(parameter FRAME_WORDS=172800,parameter BURST_WORDS=96)
  output wire O_busy,output wire O_read,output wire [24:0] O_addr,
  input wire I_ready,I_rd_valid,input wire [127:0] I_rd_data,
  output wire O_valid,output wire [127:0] O_data,
- output reg O_used,output reg O_fault
+ output wire O_used,output wire [7:0] O_statistics,output reg O_fault
 );
 function [24:0] base;
  input [1:0] p;
@@ -373,9 +373,18 @@ reg burst;
 reg [6:0] burst_words;
 reg [9:0] reserved_words;
 reg [1:0] reservation_phase;
-wire [1:0] previous_page=I_page-2'd1;
-wire [7:0] generation_gap=I_generation[I_page*8 +:8]-I_generation[previous_page*8 +:8];
-wire snapshot_good=I_complete[I_page] && I_complete[previous_page] && generation_gap==1;
+// The original camera rotation displays writer_page+2. Its older neighbour
+// is next to be overwritten; prefer the already completed newer neighbour.
+// Both choices require adjacent generations and an untouched current page.
+wire [1:0] newer_page=I_page+2'd1,older_page=I_page-2'd1;
+wire [1:0] queued_page=page(I_writer_addr);
+wire current_complete=I_complete[I_page] && !(I_writer_en && queued_page==I_page);
+wire [7:0] newer_gap=I_generation[newer_page*8 +:8]-I_generation[I_page*8 +:8];
+wire [7:0] older_gap=I_generation[I_page*8 +:8]-I_generation[older_page*8 +:8];
+wire newer_good=current_complete && I_complete[newer_page] && newer_gap==8'd1 && !(I_writer_en && queued_page==newer_page);
+wire older_good=current_complete && I_complete[older_page] && older_gap==8'd1 && !(I_writer_en && queued_page==older_page);
+wire [1:0] reference_page=newer_good?newer_page:older_page;
+wire snapshot_good=newer_good || older_good;
 // Complete flags clear on the first queued overwrite. reference_good is
 // sticky-invalid until snapshot, so a newly completed generation cannot revive it.
 wire alive=I_complete[cp] && I_complete[rp] && !(I_writer_en && (page(I_writer_addr)==cp || page(I_writer_addr)==rp));
@@ -411,19 +420,22 @@ tnr_rgb_word_filter filter(
  .I_current(current_word),.I_reference(reference_word),.I_threshold(8'd24),
  .O_valid(filtered_valid),.O_data(O_data),.O_blended(blended));
 assign O_valid=filtered_valid && !restart && I_running;
+tnr_frame_statistics #(.FRAME_WORDS(FRAME_WORDS)) statistics(
+ .clk(clk),.rst_n(rst_n),.I_epoch(I_epoch),.I_snapshot(I_snapshot),
+ .I_reference_word(pair_valid && pair_good && reference_ok),
+ .I_blended_word(O_valid && blended),.O_any(O_used),.O_statistics(O_statistics));
 always @(posedge clk or negedge rst_n)begin
  if(!rst_n)begin
   cp<=0;rp<=0;reference_good<=0;snapshot_done<=0;
-  frame_word<=0;burst<=0;burst_words<=0;reserved_words<=0;reservation_phase<=0;O_used<=0;O_fault<=0;
+  frame_word<=0;burst<=0;burst_words<=0;reserved_words<=0;reservation_phase<=0;O_fault<=0;
  end else begin
   if(transport_fault)O_fault<=1;
   if(restart)begin
-   cp<=I_page;rp<=previous_page;
+   cp<=I_page;rp<=reference_page;
    reference_good<=I_snapshot && snapshot_good;snapshot_done<=I_snapshot;
-   frame_word<=0;burst<=0;burst_words<=0;reserved_words<=0;reservation_phase<=0;O_used<=0;
+   frame_word<=0;burst<=0;burst_words<=0;reserved_words<=0;reservation_phase<=0;
   end else begin
-   if(!alive)begin reference_good<=0;O_used<=0;end
-   else if(O_valid && blended)O_used<=1;
+   if(!alive)reference_good<=0;
    if(start)begin burst<=1;burst_words<=0;end
    if(take)begin
     frame_word<=frame_word+1'b1;burst_words<=burst_words+1'b1;
@@ -438,6 +450,44 @@ always @(posedge clk or negedge rst_n)begin
    endcase
    if(filtered_valid && !I_running)O_fault<=1;
    if(O_valid && (reserved_words==0 || available==0))O_fault<=1;
+  end
+ end
+end
+endmodule
+
+// Read-only statistics from the preceding display epoch. Each digit is the
+// number of complete eighths of FRAME_WORDS (0..8), rounded down. The current
+// display page, transport, filter threshold and output timing are unaffected.
+module tnr_frame_statistics #(parameter FRAME_WORDS=172800)(
+ input wire clk,rst_n,I_epoch,I_snapshot,I_reference_word,I_blended_word,
+ output reg O_any,output reg [7:0] O_statistics
+);
+localparam CHUNK=(FRAME_WORDS+7)/8;
+localparam WIDTH=(CHUNK<=1)?1:$clog2(CHUNK);
+reg [WIDTH-1:0] reference_remainder,average_remainder;
+reg [3:0] reference_bins,average_bins;
+reg frame_any,epoch_d;
+always @(posedge clk or negedge rst_n)begin
+ if(!rst_n)begin
+  reference_remainder<=0;average_remainder<=0;reference_bins<=0;average_bins<=0;
+  frame_any<=0;epoch_d<=0;O_any<=0;O_statistics<=0;
+ end else begin
+  epoch_d<=I_epoch;
+  if(I_epoch && !epoch_d)begin O_any<=frame_any;O_statistics<={reference_bins,average_bins};end
+  if(I_epoch || I_snapshot)begin
+   reference_remainder<=0;average_remainder<=0;reference_bins<=0;average_bins<=0;frame_any<=0;
+  end else begin
+   if(I_reference_word && reference_bins<8)begin
+    if(reference_remainder==CHUNK-1)begin reference_remainder<=0;reference_bins<=reference_bins+1'b1;end
+    else reference_remainder<=reference_remainder+1'b1;
+   end
+   if(I_blended_word)begin
+    frame_any<=1;
+    if(average_bins<8)begin
+     if(average_remainder==CHUNK-1)begin average_remainder<=0;average_bins<=average_bins+1'b1;end
+     else average_remainder<=average_remainder+1'b1;
+    end
+   end
   end
  end
 end

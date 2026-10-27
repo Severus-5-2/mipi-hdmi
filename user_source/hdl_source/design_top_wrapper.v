@@ -988,15 +988,18 @@ isp_top u_isp_top (
     wire [3:0] S_tnr_page_complete;
     wire [31:0] S_tnr_page_generation;
     wire S_tnr_used,S_tnr_fault;
+    wire [7:0] S_tnr_statistics;
+    reg [7:0] S_tnr_statistics_meta,S_tnr_statistics_sync;
     reg [1:0] S_tnr_cfg_sync,S_tnr_used_sync,S_tnr_fault_sync;
     reg [3:0] S_tnr_pages_meta,S_tnr_pages_sync;
     always @(posedge S_ddr_clk or negedge S_rst_n)
         if(!S_rst_n)S_tnr_cfg_sync<=0;else S_tnr_cfg_sync<={S_tnr_cfg_sync[0],S_ae_req};
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n)
-        if(!S_hdmi_rst_n)begin S_tnr_used_sync<=0;S_tnr_fault_sync<=0;S_tnr_pages_meta<=0;S_tnr_pages_sync<=0;end
+        if(!S_hdmi_rst_n)begin S_tnr_used_sync<=0;S_tnr_fault_sync<=0;S_tnr_pages_meta<=0;S_tnr_pages_sync<=0;S_tnr_statistics_meta<=0;S_tnr_statistics_sync<=0;end
         else begin
             S_tnr_used_sync<={S_tnr_used_sync[0],S_tnr_used};S_tnr_fault_sync<={S_tnr_fault_sync[0],S_tnr_fault};
             S_tnr_pages_meta<=S_tnr_page_complete;S_tnr_pages_sync<=S_tnr_pages_meta;
+            S_tnr_statistics_meta<=S_tnr_statistics;S_tnr_statistics_sync<=S_tnr_statistics_meta;
         end
     tnr_page_monitor u_tnr_page_monitor(
         .clk(S_ddr_clk),.rst_n(S_rst_n),.I_settings_busy(S_tnr_cfg_sync[1]),
@@ -1006,7 +1009,7 @@ isp_top u_isp_top (
     video_out #(.TEMPORAL_NR(1)) u_video_out(
         .I_controller_rst_n(S_rst_n),.I_writer_en(S_vi_ddr_wr_en),.I_writer_addr(S_vi_ddr_wr_addr),
         .I_page_complete(S_tnr_page_complete),.I_page_generation(S_tnr_page_generation),
-        .O_tnr_used(S_tnr_used),.O_tnr_fault(S_tnr_fault),
+        .O_tnr_used(S_tnr_used),.O_tnr_fault(S_tnr_fault),.O_tnr_statistics(S_tnr_statistics),
         .I_rst_n             ( S_video_out_rst_n    ),
         .I_ddr_clk           ( S_ddr_clk            ),
  
@@ -1314,7 +1317,7 @@ isp_top u_isp_top (
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
         .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),
-        .I_display_nr_active(S_tnr_used_sync[1]),.I_tnr_pages(S_tnr_pages_sync),.I_tnr_fault(S_tnr_fault_sync[1]),.I_scene_busy(S_scene_busy),.I_ae_quality_status(S_ae_quality_status),
+        .I_tnr_statistics(S_tnr_statistics_sync),.I_display_nr_active(S_tnr_used_sync[1]),.I_tnr_pages(S_tnr_pages_sync),.I_tnr_fault(S_tnr_fault_sync[1]),.I_scene_busy(S_scene_busy),.I_ae_quality_status(S_ae_quality_status),
         .I_cal_enable(FIELD_METER_DIAG),.I_cal_bcd(S_field_bcd),.I_cal_ready(S_field_ready),
         .I_alarm(S_event_alarm), .I_ready(S_event_ready),
         .I_events_bcd(S_event_count),
