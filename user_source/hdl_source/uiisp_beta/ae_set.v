@@ -45,16 +45,17 @@
 //    本模块用 WAIT_FRAMES（默认 5）控制两次调整之间的最小间隔，
 //    即等待新参数经过相机与显示缓存生效后再调整，确保上一次调整的画面已经完全稳定。
 //
-//  2026-10-28: AE ALWAYS remains active. K1/K2 lower/raise its brightness target.
-//  Keys never freeze exposure or feedback. BOTH held~1s restore target128.
-//  Gain ceiling stays175; highlight protection remains active at every target.
+//  2026-10-28: boot with full AE. K1/K2 directly trim gain and hold that gain
+//  after release; exposure keeps following the automatic brightness feedback.
+//  A sustained scene-brightness change returns gain to full AE. BOTH held~1s
+//  explicitly restores full AE. The brightness target remains128, gain16..175.
 //=============================================================================
 
 module ae_set
 (
     input  wire        I_clk,           // 24 MHz 配置时钟
     input  wire        I_rst,           // 高电平复位
-    input  wire [ 3:0] I_btn,           // 按键，低有效：[2]调暗 [3]调亮，[1:0]未接
+    input  wire [ 3:0] I_btn,           // 按键，低有效：[2]减增益 [3]加增益，[1:0]未接
     input  wire        I_ae_cfg_done,   // 上一轮 AE 寄存器写入完成
     input  wire        I_cam_cfg_done,  // sensor 初始化寄存器写入完成
 
@@ -65,7 +66,7 @@ module ae_set
     output wire        O_ae_req,        // 请求写一次曝光/增益
     output wire [15:0] O_ae,            // 曝光值（单位 1/2 行）
     output wire [15:0] O_ag,            // 增益控制字（送 SC520GainTbl 查表）
-    output reg [27:0]  O_quality_status // {brightness target BCD3, exposure command BCD4}
+    output reg [27:0]  O_quality_status // {manual gain, target BCD[10:0], exposure BCD4}
 );
 
 //=============================================================================
@@ -76,7 +77,7 @@ parameter [ 7:0]    TARGET_DEF  = 8'd128;    // 上电默认靶亮度（Gamma �
                                              // v6.3 A项：120→145。120 对应线性域约 18% 灰，
                                              // 显示域偏暗（用户"和手机差距大"）；145 约 30% 灰，
                                              // 接近相机 18% 中灰经 sRGB 显示后的观感亮度。
-// K1/K2 set the continuous AE brightness target (click BTN_STEP, hold1).
+// K1/K2 trim the desired gain (click BTN_STEP, hold1). Target stays fixed.
 parameter [ 7:0]    TARGET_MIN  = 8'd60;
 parameter [ 7:0]    TARGET_MAX  = 8'd200;
 parameter [ 7:0]    BTN_STEP    = 8'd16;
@@ -101,7 +102,7 @@ parameter [ 3:0]    WAIT_FRAMES = 4'd5;      // 两次调整之间要空等的�
 //=============================================================================
 //  定时脉冲生成（沿用原版逻辑）
 //    r_ae_tick：每约4.167ms一个脉冲（24MHz下计数100000）
-//    r_ag_tick：每约133ms一个脉冲，用于长按亮度目标微调
+//    r_ag_tick：每约133ms一个脉冲，用于长按增益微调
 //=============================================================================
 reg [19:0] rc_ae_tick = 0;
 reg        r_ae_tick  = 0;
@@ -182,7 +183,7 @@ always @(posedge I_clk or posedge I_rst) begin
 end
 wire hold_repeat=hold_ticks==72 && r_ag_tick;
 wire key_adjust=!chord_lock && key_single && (btn_add_edge || btn_sub_edge || hold_repeat);
-wire [7:0] target_key_step=(btn_add_edge || btn_sub_edge)?BTN_STEP:8'd1;
+wire [15:0] gain_key_step=(btn_add_edge || btn_sub_edge)?{8'd0,BTN_STEP}:16'd1;
 
 //=============================================================================
 //  一、跨时钟域接收 ae_meter 的帧信号
@@ -307,29 +308,118 @@ wire [15:0] ef_ae=(step_ae_raw!=0)?step_ae_raw:16'd1;
 wire [15:0] ef_ag=reverse_step?16'd1:step_ag;
 
 //=============================================================================
-//  六、按键靶亮度寄存器 + 持续自动调节
+//  六、手动增益干预 + 持续自动曝光 + 场景变化交回全自动
 //=============================================================================
-// The target changes immediately; exposure/gain still use fresh AE feedback.
-reg [7:0] t_target=TARGET_DEF;
+wire [7:0] t_target=TARGET_DEF;
+reg manual_gain=0;
+reg manual_ref_valid=0;
+reg manual_anchor_valid=0;
+reg [7:0] manual_y_ref=0;
+reg manual_highlight_ref=0;
+reg [7:0] manual_expected_drift=0;
+reg [1:0] manual_scene_votes=0;
+reg [1:0] manual_rebase_votes=0;
+wire [7:0] manual_y_delta=(I_Y_avg>=manual_y_ref)?
+    I_Y_avg-manual_y_ref:manual_y_ref-I_Y_avg;
+wire [8:0] manual_scene_limit={1'b0,manual_expected_drift}+9'd16;
+wire manual_scene_different=({1'b0,manual_y_delta}>=manual_scene_limit) ||
+    (manual_expected_drift==0 && I_highlight[1]!=manual_highlight_ref);
+// Keep an established scene anchor across our exposure writes. A deliberately
+// conservative2x linear-response allowance plus16 distinguishes a large scene
+// jump from the known exposure step, without a multiplier or sensor model.
+// Include the minimum one-code step at short exposures without allowing a
+// full-brightness allowance that could hide a real scene change.
+wire [2:0] manual_step_shift=reverse_step?3'd5:sh_ae;
+wire [2:0] manual_min_step_shift=(r_ae<16'd8)?3'd2:
+    (r_ae<16'd16)?3'd3:(r_ae<16'd32)?3'd4:3'd5;
+wire [2:0] manual_drift_shift=(manual_step_shift<manual_min_step_shift)?
+    manual_step_shift:manual_min_step_shift;
+wire [8:0] manual_own_drift=
+    (({1'b0,(manual_y_ref >> manual_drift_shift)} << 1)+9'd1);
+wire [8:0] manual_drift_sum={1'b0,manual_expected_drift}+manual_own_drift;
+wire manual_exposure_snapshot=manual_gain && manual_anchor_valid &&
+    r_ae_set!=r_ae && !r_ae_req && I_ae_cfg_done && I_cam_cfg_done;
+// The first three fresh post-write frames allow sensor/display latency to pass.
+// WAIT_FRAMES=5: wait_cnt2 at the fourth frame allows reference capture BEFORE
+// the next AE decision. This also makes progress while exposure still adapts.
+localparam [3:0] MANUAL_REF_WAIT=(WAIT_FRAMES>=3)?WAIT_FRAMES-3:0;
+wire manual_observe_ready=ae_ready && !command_busy && key_stable==0 && !chord_lock;
+wire manual_scene_return=manual_gain && manual_ref_valid && manual_observe_ready &&
+    frame_pulse && manual_scene_different && manual_scene_votes==2;
+// Give an observed external change up to three frames to be confirmed before
+// our own next exposure write can invalidate the old reference. Gain stays
+// held during this brief vote; exposure otherwise follows the normal AE loop.
+wire manual_scene_pending=manual_gain && manual_ref_valid &&
+    (manual_scene_votes!=0 || manual_rebase_votes!=0);
 always @(posedge I_clk or posedge I_rst) begin
-    if(I_rst) t_target<=TARGET_DEF;
-    else if(reset_quality) t_target<=TARGET_DEF;
-    else if(key_adjust) begin
-        if(key_stable[0]) t_target<=((t_target-TARGET_MIN)>target_key_step)?t_target-target_key_step:TARGET_MIN;
-        else t_target<=((TARGET_MAX-t_target)>target_key_step)?t_target+target_key_step:TARGET_MAX;
+    if(I_rst) begin
+        manual_gain<=0;manual_ref_valid<=0;manual_anchor_valid<=0;manual_y_ref<=0;
+        manual_highlight_ref<=0;manual_expected_drift<=0;manual_scene_votes<=0;manual_rebase_votes<=0;
+    end else if(reset_quality || manual_scene_return) begin
+        manual_gain<=0;manual_ref_valid<=0;manual_anchor_valid<=0;
+        manual_expected_drift<=0;manual_scene_votes<=0;manual_rebase_votes<=0;
+    end else if(key_adjust) begin
+        // The user's new gain itself can change brightness substantially:
+        // begin its first scene reference only after that new command settles.
+        manual_gain<=1;manual_ref_valid<=0;manual_anchor_valid<=0;
+        manual_expected_drift<=0;manual_scene_votes<=0;manual_rebase_votes<=0;
+    end else if(!manual_gain || !manual_observe_ready) begin
+        // Never mistake our pending I2C/exposure/gain change or held key for
+        // a new scene. Shared sensor feedback and sender continue normally.
+        manual_ref_valid<=0;manual_scene_votes<=0;manual_rebase_votes<=0;
+        if(!manual_gain) begin manual_anchor_valid<=0;manual_expected_drift<=0;end
+        else if(manual_exposure_snapshot)
+            manual_expected_drift<=manual_drift_sum[8]?8'd255:manual_drift_sum[7:0];
+    end else if(frame_pulse) begin
+        if(!manual_ref_valid) begin
+            if(wait_cnt<=MANUAL_REF_WAIT) begin
+                manual_ref_valid<=1;
+                if(manual_anchor_valid && manual_scene_different) begin
+                    // Do not absorb an external jump during our write/settle
+                    // interval into a new baseline. Confirm it against the
+                    // preserved old anchor for three fresh frames instead.
+                    manual_scene_votes<=1;
+                end else begin
+                    manual_y_ref<=I_Y_avg;manual_highlight_ref<=I_highlight[1];
+                    manual_anchor_valid<=1;manual_expected_drift<=0;manual_scene_votes<=0;
+                end
+            end
+        end else if(manual_scene_different) begin
+            manual_scene_votes<=manual_scene_votes+1'b1;manual_rebase_votes<=0;
+        end else begin
+            manual_scene_votes<=0;
+            if(manual_expected_drift!=0) begin
+                // An aborted scene candidate must not leave a widened
+                // threshold forever. Three normal frames restore the anchor
+                // and its ordinary16-level sensitivity before the next write.
+                if(manual_rebase_votes==2) begin
+                    manual_y_ref<=I_Y_avg;manual_highlight_ref<=I_highlight[1];
+                    manual_expected_drift<=0;manual_rebase_votes<=0;
+                end else manual_rebase_votes<=manual_rebase_votes+1'b1;
+            end else manual_rebase_votes<=0;
+        end
     end
 end
 always @(posedge I_clk or posedge I_rst) begin
     if(I_rst) begin
         r_ae_set<=AE_MAX;r_ag_set<=16'd96;vote_direction<=0;last_direction<=0;
+    end else if(reset_quality || manual_scene_return) begin
+        // A new policy epoch must confirm feedback direction afresh.
+        vote_direction<=0;last_direction<=0;
+    end else if(key_adjust) begin
+        // Keys own the desired gain even while the sender is busy. The
+        // original sender holds its current snapshot and later coalesces it.
+        if(key_stable[0]) r_ag_set<=((r_ag_set-AG_MIN)>gain_key_step)?r_ag_set-gain_key_step:AG_MIN;
+        else r_ag_set<=((gain_ceiling-r_ag_set)>gain_key_step)?r_ag_set+gain_key_step:gain_ceiling;
+        vote_direction<=0;last_direction<=0;
     end else if(r_ag_set>gain_ceiling) begin
         r_ag_set<=gain_ceiling;vote_direction<=0;last_direction<=2;
-    end else if(adjust_win && !command_busy) begin
+    end else if(adjust_win && !command_busy && !manual_scene_pending) begin
         vote_direction<=desired_direction;
         // First changed direction waits for confirmation. First reversal is fine.
         if(desired_direction!=0 && vote_direction==desired_direction) begin
             if(desired_direction==2) begin
-                if(r_ag_set>AG_MIN) begin
+                if(!manual_gain && r_ag_set>AG_MIN) begin
                     r_ag_set<=((r_ag_set-AG_MIN)>ef_ag)?r_ag_set-ef_ag:AG_MIN;last_direction<=2;
                 end else if(r_ae_set>AE_MIN) begin
                     r_ae_set<=((r_ae_set-AE_MIN)>ef_ae)?r_ae_set-ef_ae:AE_MIN;last_direction<=2;
@@ -337,7 +427,7 @@ always @(posedge I_clk or posedge I_rst) begin
             end else begin
                 if(r_ae_set<AE_MAX) begin
                     r_ae_set<=((AE_MAX-r_ae_set)>ef_ae)?r_ae_set+ef_ae:AE_MAX;last_direction<=1;
-                end else if(r_ag_set<gain_ceiling) begin
+                end else if(!manual_gain && r_ag_set<gain_ceiling) begin
                     r_ag_set<=((gain_ceiling-r_ag_set)>ef_ag)?r_ag_set+ef_ag:gain_ceiling;last_direction<=1;
                 end
             end
@@ -389,6 +479,6 @@ wire [15:0] target_bcd=bcd11({3'b000,t_target});
 wire [15:0] exposure_bcd=bcd11(r_ae[10:0]);
 always @(posedge I_clk or posedge I_rst)
     if(I_rst) O_quality_status<=0;
-    else O_quality_status<={target_bcd[11:0],exposure_bcd};
+    else O_quality_status<={manual_gain,target_bcd[10:0],exposure_bcd};
 
 endmodule

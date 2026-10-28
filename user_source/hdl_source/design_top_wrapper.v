@@ -1188,22 +1188,10 @@ isp_top u_isp_top (
         .O_de        (                  )
     );
 
-    osd_coord u_osd_coord(
-        .I_clk        ( S_hdmi_pixel_clk ),
-        .I_rst_n      ( S_hdmi_rst_n     ),
-        .I_de         ( S_hdmi_de        ),
-        .I_pix_x      ( S_pix_x          ),
-        .I_pix_y      ( S_pix_y          ),
-        .I_x_val      ( 11'd640          ),   // D1 固定显示标定点
-        .I_y_val      ( 10'd360          ),
-        // ★ 2026-10-14：改接 S_det_fdone（与 S_target_bus 锁存同源）——
-        //   冻结表 §1.1 铁律：采样首拍须 ≥ 总线锁存拍 或 早 ≥ 一个完整场消隐期。
-        //   新版 pix_coord_gen 的 O_frame_done 在帧首（比锁存早 ≈3 拍），
-        //   若仍接 S_frame_done 会落进"中间地带"造成静默串帧。
-        .I_frame_done ( S_det_fdone      ),
-        .O_hit        ( S_coord_hit      ),
-        .O_color      ( S_coord_color    )
-    );
+    // User-requested removal of the fixed X/Y calibration readout.
+    // Detector/tracker pixel coordinates remain in their original paths.
+    assign S_coord_hit=1'b0;
+    assign S_coord_color=24'h000000;
 
     //==================================================================
     //  ★张金艺 D5/D6（方案B §2.3 分类 / §2.4 OSD 文字）

@@ -17,7 +17,7 @@ module motion_event_osd #(
     input wire [3:0] I_tnr_pages,input wire I_tnr_fault,
     input wire [7:0] I_tnr_statistics, // Frame-held source, synchronized by TOP
     input wire I_display_nr_active, // Previous complete display epoch had any averaging
-    input wire [27:0] I_ae_quality_status,
+    input wire [27:0] I_ae_quality_status, // bit27: held gain intervention; lower27: target/exposure BCD
     input wire I_cal_enable,
     input wire [359:0] I_cal_bcd,
     input wire [1:0] I_cal_ready,
@@ -69,42 +69,48 @@ module motion_event_osd #(
         endcase end
     endfunction
     wire [31:0] zone_word=I_alarm?{8'ha1,8'ha2,8'h20,8'h20}:I_ready?{8'ha3,8'ha4,8'h20,8'h20}:{8'h93,8'h94,8'h20,8'h20};
+    // Gain override is frame-held with the existing status bus; exposure stays automatic.
+    wire [15:0] gain_control_word=qs_frame[27]?{8'hb6,8'h92}:{8'ha8,8'h92};
     reg [31:0] display_word;
     always @* case(I_display_mode)
-        2'd0:display_word={8'h80,8'h81,8'h20,8'h20};
-        2'd1:display_word={8'h82,8'h83,8'h20,8'h20};
-        2'd2:display_word={8'h84,8'h85,8'h20,8'h20};
-        2'd3:display_word={8'h86,8'h87,8'h20,8'h20};
-        default:display_word={8'h80,8'h81,8'h20,8'h20};
+        2'd0:display_word={8'h80,8'h81,gain_control_word};
+        2'd1:display_word={8'h82,8'h83,gain_control_word};
+        2'd2:display_word={8'h84,8'h85,gain_control_word};
+        2'd3:display_word={8'h86,8'h87,gain_control_word};
+        default:display_word={8'h80,8'h81,gain_control_word};
     endcase
     wire [7:0] event_tens={4'd0,I_events_bcd[7:4]}+8'h30;
     wire [7:0] event_ones={4'd0,I_events_bcd[3:0]}+8'h30;
     reg [127:0] line_text;
+    // Compact five-row panel. Removed mode/NR, exposure/target and XY readouts.
+    // Rows are anchored at y592,608,624,640,656; each cell remains16x16.
     always @* begin
-        case(I_pix_y[6:4])
-            3'd5:line_text=DISPLAY_NR_AB?{display_word,8'h88,8'h89,8'h3a,tnr_state,8'h20,8'h8a,8'hb4,valid_digit,8'hb5,8'h89,average_digit,8'h20}:{display_word,8'hb2,8'hb3,8'h3a,(8'h30+{6'd0,nr_frame}),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-            3'd6:begin
-                if(!I_features_enable) line_text={8'h95,8'h96,8'h3a,8'hb0,8'hb1,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                else if(I_color_mode) line_text={8'h8d,8'h81,8'h3a,state_word(I_red_state),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                else line_text={8'h9f,8'ha0,8'h3a,zone_word,8'h20,8'ha5,8'ha6,8'h3a,event_tens,event_ones,8'h20,8'h20,8'h20};
-            end
-            3'd7:begin
-                if(!I_features_enable) line_text={8'haf,8'ha2,8'h3a,8'hb0,8'hb1,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                else if(I_color_mode) line_text={8'h8e,8'h81,8'h3a,state_word(I_blue_state),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                else line_text={8'ha7,8'h92,8'h3a,({4'd0,I_roi_bcd[11:8]}+8'h30),({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-            end
-            3'd0:begin
-                if(!I_features_enable) line_text=128'h20202020202020202020202020202020;
-                else if(I_color_mode) line_text={8'h95,8'h96,8'h3a,(I_det_full?{8'h99,8'h9a}:{8'h97,8'h98}),8'h20,8'h9b,8'h9c,8'h3a,(I_scene_busy?"1":"0"),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                else line_text={8'ha8,8'h92,8'h3a,8'ha9,8'haa,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-            end
-            3'd1:begin
-                if(!I_features_enable) line_text={8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                else if(I_color_mode) line_text={8'h53,8'h57,8'h34,8'h3a,8'h31,8'h20,8'h8d,(8'h30+{4'd0,I_counts[0 +:4]}),8'h8e,(8'h30+{4'd0,I_counts[4 +:4]}),8'h9d,(8'h30+{4'd0,I_counts[8 +:4]}),8'h9e,8'h3a,tnr_page_hex,8'h20};
-                else line_text={8'h53,8'h57,8'h34,8'h3a,8'h30,8'h20,8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-            end
-            default:line_text={8'hab,8'hac,8'h3a,(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),(8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]}),8'h20,8'had,8'hae,8'h3a,(8'h30+{4'd0,qs_frame[27:24]}),(8'h30+{4'd0,qs_frame[23:20]}),(8'h30+{4'd0,qs_frame[19:16]}),8'h20,8'h20};
-        endcase
+        if(!I_features_enable) begin
+            case(I_pix_y[6:4])
+                3'd5:line_text={8'h95,8'h96,8'h3a,8'h20,8'hb0,8'hb1,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd6:line_text={8'haf,8'ha2,8'h3a,8'h20,8'hb0,8'hb1,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd7:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                default:line_text={8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+            endcase
+        end else if(I_color_mode) begin
+            case(I_pix_y[6:4])
+                3'd5:line_text={8'h8d,8'h81,8'h3a,8'h20,state_word(I_red_state),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd6:line_text={8'h8e,8'h81,8'h3a,8'h20,state_word(I_blue_state),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd7:line_text={8'h95,8'h96,8'h3a,8'h20,(I_det_full?{8'h99,8'h9a}:{8'h97,8'h98}),8'h20,8'h20,8'h9b,8'h9c,8'h3a,(I_scene_busy?"1":"0"),8'h20,8'h20,8'h20,8'h20};
+                3'd0:line_text={8'h8d,8'h3a,(8'h30+{4'd0,I_counts[0 +:4]}),8'h20,8'h20,8'h8e,8'h3a,(8'h30+{4'd0,I_counts[4 +:4]}),8'h20,8'h20,8'h9d,8'h3a,(8'h30+{4'd0,I_counts[8 +:4]}),8'h20,8'h20,8'h20};
+                3'd1:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                default:line_text={8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+            endcase
+        end else begin
+            case(I_pix_y[6:4])
+                3'd5:line_text={8'h9f,8'ha0,8'h3a,8'h20,zone_word,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd6:line_text={8'ha5,8'ha6,8'h3a,8'h20,event_tens,event_ones,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd7:line_text={8'ha7,8'h92,8'h3a,8'h20,({4'd0,I_roi_bcd[11:8]}+8'h30),({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd0:line_text={8'ha8,8'h92,8'h3a,8'h20,8'ha9,8'haa,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd1:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                default:line_text={8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+            endcase
+        end
     end
     wire [3:0] col=I_pix_x[7:4]-4'd1;
     wire [7:0] normal_char=line_text[127-{col,3'd0} -:8];
@@ -145,7 +151,7 @@ module motion_event_osd #(
     end
     wire [7:0] selected_char=cal_panel?cal_text[127-{cal_col,3'd0} -:8]:normal_char;
     wire panel=I_de && I_pix_x>=11'd16 && I_pix_x<11'd272 &&
-        I_pix_y>=10'd592 && I_pix_y<10'd688;
+        I_pix_y>=10'd592 && I_pix_y<10'd672;
     // Five by seven glyphs scaled by two, centered in a 16 by 16 cell.
     wire glyph_area=I_pix_x[3:0]>=3 && I_pix_x[3:0]<13 && I_pix_y[3:0]<14;
     wire roi_border=I_features_enable && !I_color_mode && I_de && I_pix_x>=ROI_X0 && I_pix_x<ROI_X1 &&
@@ -170,12 +176,12 @@ module motion_event_osd #(
             roi_d<=roi_border;
             if(!I_features_enable) color_d<=2'd3;
             else if(I_color_mode) begin
-                if(I_pix_y>=608 && I_pix_y<624) color_d<=2'd1;
-                else if(I_pix_y>=624 && I_pix_y<640) color_d<=2'd2;
-                else if(I_pix_y>=640 && I_pix_y<656 && I_det_full) color_d<=2'd1;
+                if(I_pix_y>=592 && I_pix_y<608) color_d<=2'd1;
+                else if(I_pix_y>=608 && I_pix_y<624) color_d<=2'd2;
+                else if(I_pix_y>=624 && I_pix_y<640 && I_det_full) color_d<=2'd1;
                 else color_d<=2'd3;
             end else begin
-                if(I_pix_y>=608 && I_pix_y<624) color_d<=I_alarm?2'd1:I_ready?2'd0:2'd3;
+                if(I_pix_y>=592 && I_pix_y<608) color_d<=I_alarm?2'd1:I_ready?2'd0:2'd3;
                 else color_d<=2'd3;
             end
         end
@@ -1104,22 +1110,23 @@ module motion_event_osd #(
         cn_rows[861] = 16'h0100;
         cn_rows[862] = 16'h0100;
         cn_rows[863] = 16'h0100;
-        cn_rows[864] = 16'h0000;
-        cn_rows[865] = 16'h0000;
-        cn_rows[866] = 16'h0000;
-        cn_rows[867] = 16'h0000;
-        cn_rows[868] = 16'h0000;
-        cn_rows[869] = 16'h0000;
-        cn_rows[870] = 16'h0000;
-        cn_rows[871] = 16'h0000;
-        cn_rows[872] = 16'h0000;
-        cn_rows[873] = 16'h0000;
-        cn_rows[874] = 16'h0000;
-        cn_rows[875] = 16'h0000;
-        cn_rows[876] = 16'h0000;
-        cn_rows[877] = 16'h0000;
-        cn_rows[878] = 16'h0000;
-        cn_rows[879] = 16'h0000;
+        // CN_GLYPH 54 U+624B 手
+        cn_rows[864] = 16'h0010;
+        cn_rows[865] = 16'h00f8;
+        cn_rows[866] = 16'h3f00;
+        cn_rows[867] = 16'h0100;
+        cn_rows[868] = 16'h0100;
+        cn_rows[869] = 16'h3ff8;
+        cn_rows[870] = 16'h0100;
+        cn_rows[871] = 16'h0100;
+        cn_rows[872] = 16'h0100;
+        cn_rows[873] = 16'hfffe;
+        cn_rows[874] = 16'h0100;
+        cn_rows[875] = 16'h0100;
+        cn_rows[876] = 16'h0100;
+        cn_rows[877] = 16'h0100;
+        cn_rows[878] = 16'h0500;
+        cn_rows[879] = 16'h0200;
         cn_rows[880] = 16'h0000;
         cn_rows[881] = 16'h0000;
         cn_rows[882] = 16'h0000;
