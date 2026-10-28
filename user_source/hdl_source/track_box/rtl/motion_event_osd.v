@@ -78,7 +78,7 @@ module motion_event_osd #(
                 3'd0:line_text=DISPLAY_NR_AB?{"DET:",(I_det_full?"FULL":"NORM")," SCN:",(I_scene_busy?"1":"0"),"  "}:{"DET:",(I_det_full?"FULL":"NORM"),"        "};
                 3'd1:line_text={"SW4:1 R",(8'h30+{4'd0,I_counts[3:0]}),"B",(8'h30+{4'd0,I_counts[7:4]}),"G",(8'h30+{4'd0,I_counts[11:8]})," P:",tnr_page_hex};
                 default:line_text={"AE:",(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),
-                    (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," MAX:",
+                    (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," TGT:",
                     (8'h30+{4'd0,qs_frame[27:24]}),(8'h30+{4'd0,qs_frame[23:20]}),(8'h30+{4'd0,qs_frame[19:16]})," "};
             endcase
         end else begin
@@ -90,7 +90,7 @@ module motion_event_osd #(
                 3'd0:line_text="AUTO:CLEAR      ";
                 3'd1:line_text={"SW4:0 P:",tnr_page_hex,"       "};
                 default:line_text={"AE:",(8'h30+{4'd0,qs_frame[15:12]}),(8'h30+{4'd0,qs_frame[11:8]}),
-                    (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," MAX:",
+                    (8'h30+{4'd0,qs_frame[7:4]}),(8'h30+{4'd0,qs_frame[3:0]})," TGT:",
                     (8'h30+{4'd0,qs_frame[27:24]}),(8'h30+{4'd0,qs_frame[23:20]}),(8'h30+{4'd0,qs_frame[19:16]})," "};
             endcase
         end

@@ -1,3 +1,5 @@
+// 2026-10-27 detail balance: limit dark neighbor contrast to31, protecting
+// 32-level strokes that2310 averaged away. Same window, chroma and latency.
 // 2026-10-27: optional dark flat-region luma averaging; original pixel/row alignment.
 // FLAT_LUMA_NR=0 retains the 1903 arithmetic; chroma is identical in both modes.
 // 2026-10-25: restore 1325 H3 arithmetic; frame/line tags clamp missing neighbors.
@@ -222,7 +224,7 @@ module chroma_denoise #(
     // delay, row RAM, temporal state, or change to Cb/Cr arithmetic.
     wire [7:0] h_left_delta=(yl>=yc)?yl-yc:yc-yl;
     wire [7:0] h_right_delta=(s1_y>=yc)?s1_y-yc:yc-s1_y;
-    wire h_flat=FLAT_LUMA_NR && yc<160 && h_left_delta<=48 && h_right_delta<=48;
+    wire h_flat=FLAT_LUMA_NR && yc<160 && h_left_delta<=31 && h_right_delta<=31;
     wire [9:0] h_y_mean={2'b00,yl}+{1'b0,yc,1'b0}+{2'b00,s1_y}+10'd2;
     wire [7:0] h_y_clean=h_flat?h_y_mean[9:2]:median3(yl,yc,s1_y);
 
@@ -350,7 +352,7 @@ module chroma_denoise #(
     wire [7:0] y_dn_delta=(y_dn>=p1_y)?y_dn-p1_y:p1_y-y_dn;
     // Dark grain can cross the original 24-level veto after Gamma. Widen
     // only the dark range; each stronger vertical edge retains its center.
-    wire [7:0] y_limit=(FLAT_LUMA_NR && p1_y<160)?8'd48:8'd24;
+    wire [7:0] y_limit=(FLAT_LUMA_NR && p1_y<160)?8'd31:8'd24;
     wire [7:0] y_up_safe=(y_up_delta<=y_limit)?y_up:p1_y;
     wire [7:0] y_dn_safe=(y_dn_delta<=y_limit)?y_dn:p1_y;
     wire [9:0] y_vertical={2'd0,y_up_safe}+{1'b0,p1_y,1'b0}+{2'd0,y_dn_safe}+10'd2;

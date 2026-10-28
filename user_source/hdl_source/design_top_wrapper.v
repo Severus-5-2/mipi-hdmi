@@ -11,7 +11,7 @@ module design_top_wrapper (
     output wire       O_cam_24m,
     output wire       O_cam_rst,
       
-    inout wire [1:0]  I_button,    // 板载轻触按键，低有效：[0]=KEY1(D5)=减，[1]=KEY2(A9)=增
+    inout wire [1:0]  I_button,    // 板载轻触按键，低有效：[0]=KEY1(D5)=调暗，[1]=KEY2(A9)=调亮
     input             I_sw1,   // 拨码开关SW1（A4），拨上=0，拨下=1（实测确认）
     input             I_sw2,   // 拨码开关SW2（B4），拨上=0，拨下=1（实测确认）
     input             I_sw4,   // SW4(D11): high=three-color + red/blue motion; low=zone alarm

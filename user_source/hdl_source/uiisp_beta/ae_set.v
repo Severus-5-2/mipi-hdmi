@@ -45,16 +45,16 @@
 //    本模块用 WAIT_FRAMES（默认 5）控制两次调整之间的最小间隔，
 //    即等待新参数经过相机与显示缓存生效后再调整，确保上一次调整的画面已经完全稳定。
 //
-//  2026-10-25: AE ALWAYS remains active. K1/K2 lower/raise its gain ceiling.
-//  Keys never freeze exposure or feedback. BOTH held~1s restore quality ceiling.
-//  Default target128 and gain ceiling175 favor image quality over dark boost.
+//  2026-10-28: AE ALWAYS remains active. K1/K2 lower/raise its brightness target.
+//  Keys never freeze exposure or feedback. BOTH held~1s restore target128.
+//  Gain ceiling stays175; highlight protection remains active at every target.
 //=============================================================================
 
 module ae_set
 (
     input  wire        I_clk,           // 24 MHz 配置时钟
     input  wire        I_rst,           // 高电平复位
-    input  wire [ 3:0] I_btn,           // 按键，低有效：[2]减 [3]增，[1:0]未接
+    input  wire [ 3:0] I_btn,           // 按键，低有效：[2]调暗 [3]调亮，[1:0]未接
     input  wire        I_ae_cfg_done,   // 上一轮 AE 寄存器写入完成
     input  wire        I_cam_cfg_done,  // sensor 初始化寄存器写入完成
 
@@ -65,19 +65,18 @@ module ae_set
     output wire        O_ae_req,        // 请求写一次曝光/增益
     output wire [15:0] O_ae,            // 曝光值（单位 1/2 行）
     output wire [15:0] O_ag,            // 增益控制字（送 SC520GainTbl 查表）
-    output reg [27:0]  O_quality_status // {gain ceiling BCD3, exposure command BCD4}
+    output reg [27:0]  O_quality_status // {brightness target BCD3, exposure command BCD4}
 );
 
 //=============================================================================
 //  可调参数（综合期常量，改完需重新编译）
 //=============================================================================
-parameter           AUTO_EN     = 1'b1;      // 1:自动曝光使能  0:关闭自动（纯手动）
+parameter           AUTO_EN     = 1'b1;      // 1:自动曝光使能  0:关闭反馈调节
 parameter [ 7:0]    TARGET_DEF  = 8'd128;    // 上电默认靶亮度（Gamma 后显示域，中灰偏亮）
                                              // v6.3 A项：120→145。120 对应线性域约 18% 灰，
                                              // 显示域偏暗（用户"和手机差距大"）；145 约 30% 灰，
                                              // 接近相机 18% 中灰经 sRGB 显示后的观感亮度。
-// Legacy target-key parameters retained for source compatibility only.
-// K1/K2 now change gain directly (click16, hold1); target stays TARGET_DEF.
+// K1/K2 set the continuous AE brightness target (click BTN_STEP, hold1).
 parameter [ 7:0]    TARGET_MIN  = 8'd60;
 parameter [ 7:0]    TARGET_MAX  = 8'd200;
 parameter [ 7:0]    BTN_STEP    = 8'd16;
@@ -86,7 +85,7 @@ parameter [15:0]    AE_MIN      = 16'd4;     // 曝光下限（手册规定）
 parameter [15:0]    AE_MAX      = 16'd1991;  // 曝光上限（= 2×VTS−9，满帧）
 parameter [15:0]    AG_MIN      = 16'd16;    // 增益控制字下限 = 1x
 // 2026-10-24: quality ceiling 55x (199); old 207 is 63x.
-parameter [15:0]    AG_QUALITY_MAX = 16'd175; // Default quality ceiling; K2 can raise it
+parameter [15:0]    AG_QUALITY_MAX = 16'd175; // Fixed quality ceiling; keys do not raise it
 parameter [15:0]    AG_MAX      = 16'd199;   // 增益控制字上限
                                              // ★v6.6：239(126x) → 207(63x)。
                                              //   原因：现场照片定量分析证明屏幕噪点是
@@ -102,7 +101,7 @@ parameter [ 3:0]    WAIT_FRAMES = 4'd5;      // 两次调整之间要空等的�
 //=============================================================================
 //  定时脉冲生成（沿用原版逻辑）
 //    r_ae_tick：每约4.167ms一个脉冲（24MHz下计数100000）
-//    r_ag_tick：每约133ms一个脉冲，用于长按增益微调
+//    r_ag_tick：每约133ms一个脉冲，用于长按亮度目标微调
 //=============================================================================
 reg [19:0] rc_ae_tick = 0;
 reg        r_ae_tick  = 0;
@@ -149,7 +148,7 @@ end
 reg [1:0] key_s0=0,key_s1=0,key_stable=0,key_prev=0;
 reg [7:0] chord_ticks=0;
 reg chord_lock=0;
-reg [15:0] gain_ceiling=AG_QUALITY_MAX;
+wire [15:0] gain_ceiling=AG_QUALITY_MAX;
 always @(posedge I_clk or posedge I_rst) begin
     if(I_rst) begin
         key_s0<=0;key_s1<=0;key_stable<=0;key_prev<=0;
@@ -183,7 +182,7 @@ always @(posedge I_clk or posedge I_rst) begin
 end
 wire hold_repeat=hold_ticks==72 && r_ag_tick;
 wire key_adjust=!chord_lock && key_single && (btn_add_edge || btn_sub_edge || hold_repeat);
-wire [15:0] gain_key_step=(btn_add_edge || btn_sub_edge)?16'd16:16'd1;
+wire [7:0] target_key_step=(btn_add_edge || btn_sub_edge)?BTN_STEP:8'd1;
 
 //=============================================================================
 //  一、跨时钟域接收 ae_meter 的帧信号
@@ -308,16 +307,16 @@ wire [15:0] ef_ae=(step_ae_raw!=0)?step_ae_raw:16'd1;
 wire [15:0] ef_ag=reverse_step?16'd1:step_ag;
 
 //=============================================================================
-//  六、靶亮度寄存器 + 目标值寄存器 + 自动/手动调节
+//  六、按键靶亮度寄存器 + 持续自动调节
 //=============================================================================
-// Keys change only the AG ceiling; the feedback loop runs continuously.
-wire [7:0] t_target=TARGET_DEF;
+// The target changes immediately; exposure/gain still use fresh AE feedback.
+reg [7:0] t_target=TARGET_DEF;
 always @(posedge I_clk or posedge I_rst) begin
-    if(I_rst) gain_ceiling<=AG_QUALITY_MAX;
-    else if(reset_quality) gain_ceiling<=AG_QUALITY_MAX;
+    if(I_rst) t_target<=TARGET_DEF;
+    else if(reset_quality) t_target<=TARGET_DEF;
     else if(key_adjust) begin
-        if(key_stable[0]) gain_ceiling<=((gain_ceiling-AG_MIN)>gain_key_step)?gain_ceiling-gain_key_step:AG_MIN;
-        else gain_ceiling<=((AG_MAX-gain_ceiling)>gain_key_step)?gain_ceiling+gain_key_step:AG_MAX;
+        if(key_stable[0]) t_target<=((t_target-TARGET_MIN)>target_key_step)?t_target-target_key_step:TARGET_MIN;
+        else t_target<=((TARGET_MAX-t_target)>target_key_step)?t_target+target_key_step:TARGET_MAX;
     end
 end
 always @(posedge I_clk or posedge I_rst) begin
@@ -386,10 +385,10 @@ function [15:0] bcd11;
         bcd11=v;
     end
 endfunction
-wire [15:0] ceiling_bcd=bcd11(gain_ceiling[10:0]);
+wire [15:0] target_bcd=bcd11({3'b000,t_target});
 wire [15:0] exposure_bcd=bcd11(r_ae[10:0]);
 always @(posedge I_clk or posedge I_rst)
     if(I_rst) O_quality_status<=0;
-    else O_quality_status<={ceiling_bcd[11:0],exposure_bcd};
+    else O_quality_status<={target_bcd[11:0],exposure_bcd};
 
 endmodule
