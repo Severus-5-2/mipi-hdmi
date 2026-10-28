@@ -231,13 +231,13 @@ module design_top_wrapper (
     wire [359:0] S_field_bcd;
     wire [1:0] S_field_ready;
     wire        S_frame_done;      // 每帧结束脉冲（消隐期计算用）
-    wire        S_box_hit;         // 画框 / 十字准星命中
+    wire        S_box_hit;         // 目标边框命中（正式画面禁用中央准星）
     wire [23:0] S_box_color;
     wire        S_coord_hit;       // 坐标 OSD 命中
     wire [23:0] S_coord_color;
 
     //===== 叠加仲裁（张铭晨 + 张金艺 共用一条进入 hdmi_mixer 的通道）=====
-    //  优先级（高→低）：坐标数字 OSD > 画框/准星 > 检测掩膜
+    //  优先级（高→低）：坐标数字 OSD > 目标边框 > 检测掩膜
     //  ★合并张金艺代码时：只把 S_mask_hit / S_mask_color 的驱动源换成 detect 模块输出，
     //    不要另开 hdmi_mixer 端口 —— 两人改同一个文件必然冲突。
     wire        S_mask_hit;        // 预留：目标检测掩膜/伪彩（张金艺 D1）
@@ -310,10 +310,15 @@ module design_top_wrapper (
     reg [1:0] R_alarm_switch_sync;
     reg R_alarm_switch_stable;
     reg R_color_mode; // Debounced SW4 level, committed only at a frame boundary.
+    // Display mode and SW4 select independent controls. Non-color video
+    // disables BOTH feature modes without changing the selected SW4 mode.
+    wire S_features_enable=(S_mode_sel==2'b00);
+    wire S_detection_enable=S_features_enable && R_color_mode;
+    reg R_features_enable; // Last detector-frame eligibility, for history clearing.
     // Seven empty lists exceed the tracker's fixed MAX_MISS=5. Reentering
     // color mode always expires every old track before admitting detections.
     reg [2:0] R_tracking_flush;
-    wire S_color_tracking_active=R_color_mode && (R_tracking_flush==0);
+    wire S_color_tracking_active=S_detection_enable && (R_tracking_flush==0);
     wire [3:0] S_color_box_valid=S_box_valid & {4{S_color_tracking_active}};
     wire [`TGT_BUS_W-1:0] S_tracking_bus;
     wire [`TGT_BUS_W-1:0] S_count_bus;
@@ -332,7 +337,8 @@ module design_top_wrapper (
              S_target_bus[color_slot*`TGT_SLOT_W] && S_color_tracking_active};
     end endgenerate
     reg [19:0] R_alarm_switch_debounce;
-    wire S_function_change=S_det_fdone && (R_color_mode!=R_alarm_switch_stable);
+    wire S_function_change=S_det_fdone &&
+        ((R_color_mode!=R_alarm_switch_stable) || (R_features_enable!=S_features_enable));
 
     //===== 自动曝光 AE 测光信号 =====
     wire [7:0]  S_ae_y_avg;        // 帧平均亮度（74.25MHz 域，更新后保持整帧）
@@ -341,23 +347,26 @@ module design_top_wrapper (
 
     // ===== 拨码开关模式选择 =====
     // 拨码开关是静态电平：拨上=0，拨下=1（注意与上拉方向相反，实测确认），无需消抖
-    // 只需双拍同步防亚稳态
+    // 双拍同步后在场消隐提交，画面和检测资格整帧一致。
     reg [1:0] sw_sync1;
     reg [1:0] sw_sync2;
+    reg [1:0] R_display_mode;
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) 
       begin
         if(!S_hdmi_rst_n) 
           begin
             sw_sync1 <= 2'b00;
             sw_sync2 <= 2'b00;
+            R_display_mode <= 2'b00;
           end
         else 
           begin
             sw_sync1 <= {I_sw2, I_sw1};  // {SW2, SW1} → 00/01/10/11
             sw_sync2 <= sw_sync1;
+            if(S_frame_end) R_display_mode <= sw_sync2;
           end
       end
-    assign S_mode_sel = sw_sync2;   // 输出给pixel_mux_4to1
+    assign S_mode_sel = R_display_mode; // Same frame-held mode for pixels and features.
  
 
 
@@ -1122,7 +1131,7 @@ isp_top u_isp_top (
     //   SELF_TEST=1 ⇒ 画 4 个写死坐标的框 + 白色十字准星（准星在屏心 640,360），
     //   与左下角 OSD 读数 X:0640 / Y:0360 互相印证。
     //   ★D4（张金艺）：SELF_TEST 已改 0，I_box_* 接真实检测目标（由下方
-    //     conn_features 的 384bit 目标总线展开）；十字准星保留作对位基准。
+    //     conn_features 的 384bit 目标总线展开）；正式画面取消十字准星。
     //   注：本段仅在 Rrrrrr_ 分支集成，未改动任何原有逻辑。
     //==================================================================
     pix_coord_gen #(
@@ -1171,7 +1180,7 @@ isp_top u_isp_top (
         .I_box_xmax  ( S_box_xmax       ),
         .I_box_ymin  ( S_box_ymin       ),
         .I_box_ymax  ( S_box_ymax       ),
-        .I_cross_en  ( 1'b1             ),   // 十字准星保留（屏心 640,360，便于对位）
+        .I_cross_en  ( 1'b0             ),   // 正式画面取消屏心标定准星。
         .I_cross_x   ( 11'd640          ),
         .I_cross_y   ( 10'd360          ),
         .O_hit       ( S_box_hit        ),
@@ -1269,11 +1278,13 @@ isp_top u_isp_top (
         if(!S_hdmi_rst_n) begin
             R_alarm_switch_sync<=0; R_alarm_switch_stable<=0;
             R_alarm_switch_debounce<=0; R_color_mode<=0; R_tracking_flush<=3'd7;
+            R_features_enable<=1'b1;
         end else begin
             R_alarm_switch_sync<={R_alarm_switch_sync[0],I_sw4};
             if(S_det_fdone) begin
                 R_color_mode<=R_alarm_switch_stable;
-                if(!R_alarm_switch_stable || R_color_mode!=R_alarm_switch_stable)
+                R_features_enable<=S_features_enable;
+                if(!S_features_enable || !R_alarm_switch_stable || S_function_change)
                     R_tracking_flush<=3'd7;
                 else if(R_tracking_flush!=0) R_tracking_flush<=R_tracking_flush-3'd1;
             end
@@ -1291,7 +1302,9 @@ isp_top u_isp_top (
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
         .I_gray(S_gray_out), .I_frame_done(S_det_fdone),
-        .I_color_mode(R_color_mode), .I_mode_change(S_function_change),
+        // With no eligible display, the no-box color branch is inert:
+        // no regional alarm can arm/count, and cumulative events survive.
+        .I_color_mode(R_color_mode || !S_features_enable), .I_mode_change(S_function_change),
         .I_box_valid(S_color_box_valid), .I_box_cls(S_box_cls),
         .I_box_xmin(S_box_xmin), .I_box_xmax(S_box_xmax),
         .I_box_ymin(S_box_ymin), .I_box_ymax(S_box_ymax),
@@ -1317,7 +1330,8 @@ isp_top u_isp_top (
     )u_motion_event_osd(
         .I_clk(S_hdmi_pixel_clk), .I_rst_n(S_hdmi_rst_n),
         .I_de(S_hdmi_de), .I_pix_x(S_pix_x), .I_pix_y(S_pix_y),
-        .I_color_mode(R_color_mode), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),
+        .I_color_mode(R_color_mode), .I_features_enable(S_features_enable),
+        .I_display_mode(S_mode_sel), .I_counts(S_color_counts),.I_nr_level(S_raw_nr_level),
         .I_tnr_statistics(S_tnr_statistics_sync),.I_display_nr_active(S_tnr_used_sync[1]),.I_tnr_pages(S_tnr_pages_sync),.I_tnr_fault(S_tnr_fault_sync[1]),.I_scene_busy(S_scene_busy),.I_ae_quality_status(S_ae_quality_status),
         .I_cal_enable(FIELD_METER_DIAG),.I_cal_bcd(S_field_bcd),.I_cal_ready(S_field_ready),
         .I_alarm(S_event_alarm), .I_ready(S_event_ready),
@@ -1430,10 +1444,11 @@ isp_top u_isp_top (
         .clk            ( S_hdmi_pixel_clk ),
         .rst_n          ( S_hdmi_rst_n     ),
         .I_de           ( S_det_de         ),
-        .I_mask         ( S_mask_hit       ),
-        .I_mask_r       ( S_det_mask_r     ),
-        .I_mask_g       ( S_det_mask_g     ),
-        .I_mask_b       ( S_det_mask_b     ),
+        // Keep DE/coordinates/frame pulses alive so inactive histories drain.
+        .I_mask         ( S_mask_hit && S_detection_enable ),
+        .I_mask_r       ( S_det_mask_r && S_detection_enable ),
+        .I_mask_g       ( S_det_mask_g && S_detection_enable ),
+        .I_mask_b       ( S_det_mask_b && S_detection_enable ),
         .I_frame_done   ( S_det_fdone      ),
         .I_pix_x        ( S_det_px         ),
         .I_pix_y        ( S_det_py         ),
@@ -1542,11 +1557,11 @@ isp_top u_isp_top (
     //    hdmi_mixer 不需要改 —— 所有人共用 S_ovl_hit / S_ovl_color 这一条通道。
     // Select one feature overlay; shared video/AE processing remains continuous.
     // Inactive histories are cleared; the tracker consumes empty target lists.
-    assign S_ovl_hit = S_event_hit | (R_color_mode &&
+    assign S_ovl_hit = S_event_hit | (S_detection_enable &&
         (S_box_hit | S_coord_hit | S_cat_hit | (MASK_OVERLAY_EN && S_dspk_mask)));
-    assign S_ovl_color = (R_color_mode && S_coord_hit) ? S_coord_color :
-                         (R_color_mode && S_box_hit) ? S_box_color :
-                         (R_color_mode && S_cat_hit) ? S_cat_color :
+    assign S_ovl_color = (S_detection_enable && S_coord_hit) ? S_coord_color :
+                         (S_detection_enable && S_box_hit) ? S_box_color :
+                         (S_detection_enable && S_cat_hit) ? S_cat_color :
                          S_event_hit ? S_event_color : S_mask_color;
 
     hdmi_mixer #(
@@ -1573,7 +1588,7 @@ isp_top u_isp_top (
         .I_mode          ( S_mode_sel         ),
         .I_ae_y          ( S_ae_y_avg         ),   // 预留：帧平均亮度（当前不显示）
         .I_ae_ag         ( S_ag               ),   // AE 增益控制字（OSD 第 2 行）
-        // ★叠加仲裁输出（画框 / 准星 / 坐标 OSD / 检测掩膜），优先级低于 Logo 与文字 OSD
+        // ★叠加仲裁输出（目标边框 / 坐标 OSD / 检测掩膜），优先级低于 Logo 与文字 OSD
         .I_ext_hit       ( S_ovl_hit          ),
         .I_ext_color     ( S_ovl_color        ),
         .O_video_rd_en   ( S_hdmi_window_rd_en),
