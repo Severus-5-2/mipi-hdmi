@@ -56,7 +56,6 @@ module motion_event_osd #(
     end
     wire [7:0] valid_digit=8'h30+{4'd0,statistics_frame[7:4]};
     wire [7:0] average_digit=8'h30+{4'd0,statistics_frame[3:0]};
-    wire [7:0] tnr_page_hex=(I_tnr_pages<10)?8'h30+I_tnr_pages:8'h41+(I_tnr_pages-10);
     // Private 8-bit glyph IDs; every display cell remains exactly 16 pixels.
     wire [7:0] tnr_state=I_tnr_fault?8'h8c:I_display_nr_active?8'h8a:8'h8b;
     function [31:0] state_word;
@@ -89,7 +88,7 @@ module motion_event_osd #(
             case(I_pix_y[6:4])
                 3'd5:line_text={8'h95,8'h96,8'h3a,8'h20,8'hb0,8'hb1,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
                 3'd6:line_text={8'haf,8'ha2,8'h3a,8'h20,8'hb0,8'hb1,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                3'd7:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd7:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
                 default:line_text={8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
             endcase
         end else if(I_color_mode) begin
@@ -98,7 +97,7 @@ module motion_event_osd #(
                 3'd6:line_text={8'h8e,8'h81,8'h3a,8'h20,state_word(I_blue_state),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
                 3'd7:line_text={8'h95,8'h96,8'h3a,8'h20,(I_det_full?{8'h99,8'h9a}:{8'h97,8'h98}),8'h20,8'h20,8'h9b,8'h9c,8'h3a,(I_scene_busy?"1":"0"),8'h20,8'h20,8'h20,8'h20};
                 3'd0:line_text={8'h8d,8'h3a,(8'h30+{4'd0,I_counts[0 +:4]}),8'h20,8'h20,8'h8e,8'h3a,(8'h30+{4'd0,I_counts[4 +:4]}),8'h20,8'h20,8'h9d,8'h3a,(8'h30+{4'd0,I_counts[8 +:4]}),8'h20,8'h20,8'h20};
-                3'd1:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd1:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
                 default:line_text={8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
             endcase
         end else begin
@@ -107,7 +106,7 @@ module motion_event_osd #(
                 3'd6:line_text={8'ha5,8'ha6,8'h3a,8'h20,event_tens,event_ones,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
                 3'd7:line_text={8'ha7,8'h92,8'h3a,8'h20,({4'd0,I_roi_bcd[11:8]}+8'h30),({4'd0,I_roi_bcd[7:4]}+8'h30),({4'd0,I_roi_bcd[3:0]}+8'h30),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
                 3'd0:line_text={8'ha8,8'h92,8'h3a,8'h20,8'ha9,8'haa,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
-                3'd1:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h9e,8'h3a,tnr_page_hex,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
+                3'd1:line_text={8'h53,8'h57,8'h34,8'h3a,(I_color_mode?"1":"0"),8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
                 default:line_text={8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20,8'h20};
             endcase
         end

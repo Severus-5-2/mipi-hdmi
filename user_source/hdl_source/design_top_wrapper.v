@@ -1217,7 +1217,7 @@ isp_top u_isp_top (
     )u_osd_category(
         .clk          ( S_hdmi_pixel_clk ),
         .rst_n        ( S_hdmi_rst_n     ),
-        .I_de         ( S_hdmi_de        ),
+        .I_de         ( 1'b0            ),
         .I_pix_x      ( S_pix_x          ),
         .I_pix_y      ( S_pix_y          ),
         .I_bus        ( S_count_bus      ),
