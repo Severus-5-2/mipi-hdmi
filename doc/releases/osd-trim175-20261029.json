@@ -1,0 +1,128 @@
+{
+  "version": "0800界面精简_保留175_20261029_1033",
+  "built_source_commit": "af83bf7d6b213fdb0f29d2591909ffc907e11e5b",
+  "baseline_0800_commit": "fc90b3d8f7514b9e2261db20a7de3d54e8ab02bc",
+  "publication_note": "Publication adds documentation only after the built source commit.",
+  "repository": "Severus-5-2/mipi-hdmi",
+  "target_branches": [
+    "Rrrrrr_",
+    "main"
+  ],
+  "manual_board_test_pending": true,
+  "ready_for_production": false,
+  "gain_control_word_range": [
+    16,
+    175
+  ],
+  "gain_start_control_word": 96,
+  "fixed_brightness_target": 128,
+  "changes_vs_0800": {
+    "user_source/hdl_source/design_top_wrapper.v": "9fd806a07b2cc036f4ba95fcc0b9fff62cf5bf75ba4295c540df4c87062288e2",
+    "user_source/hdl_source/track_box/rtl/motion_event_osd.v": "f13c81ac2f36f9f754f71b69f822656d1d083b96990673352b6732a437f86e10"
+  },
+  "frozen_project_file_count": 351,
+  "unchanged_vs_0800_file_count": 349,
+  "RTL_IP_constraints_project_unchanged_by_publication": true,
+  "excluded_experiments": [
+    "gain_217",
+    "AWB_iterative_divider"
+  ],
+  "bit": {
+    "filename": "CameraToDSI_20261029_osd_trim175_1033.bit",
+    "sha256": "e0040ba49bedef983715c452dfa29f3f632a311566417fba0ac5f05c77f8b270",
+    "uploaded_to_git": false
+  },
+  "local_delivery_zip": {
+    "filename": "0800界面精简_保留175_20261029_1033.zip",
+    "sha256": "52db8c7566fdbe4b5471b8f3bffc2cd00c59c59fdc19f754ce010488905fff86",
+    "uploaded_to_git": false
+  },
+  "timing": {
+    "stage": "Routed",
+    "report_generated_local": "Thu Oct 29 10:33:52 2026",
+    "slack_ns": {
+      "SWNS": 0.201,
+      "STNS": 0.0,
+      "HWNS": 0.02,
+      "HTNS": 0.0
+    },
+    "all_reported_violating_endpoints_zero": true,
+    "STA_coverage": "95.71%"
+  },
+  "resources_final_physical": {
+    "IO": "61   out of    160   38.12%",
+    "slice": "20758   out of  21216   97.84%",
+    "lut6": "19652   out of  21216   92.63%",
+    "reg": "20607",
+    "eram": "108   out of    108  100.00%",
+    "dsp": "37   out of     40   92.50%"
+  },
+  "resources_0800_final_physical": {
+    "IO": "61   out of    160   38.12%",
+    "slice": "20810   out of  21216   98.09%",
+    "lut6": "19690   out of  21216   92.81%",
+    "reg": "20617",
+    "eram": "108   out of    108  100.00%",
+    "dsp": "37   out of     40   92.50%"
+  },
+  "raw_zero_endpoint_drop_gate": "BLOCK",
+  "HDMI_endpoint_counts": {
+    "0800": 14681,
+    "candidate": 14678
+  },
+  "engineering_decision": "Accept as manual board test candidate after source and actual netlist review; preserve raw gate result.",
+  "formal_equivalence_claimed": false,
+  "tests": [
+    {
+      "name": "osd",
+      "passed": true,
+      "provenance": "fresh",
+      "baseline_commit": null,
+      "report_sha256": "f3290d667abe323a3e6c98464d7d833ed85a71414ff7d4f09d077363e65e8671",
+      "source_hash_bindings_checked": 1,
+      "local_report": "work/osd_trim175_osd_validation/result.json"
+    },
+    {
+      "name": "top_mode_switch",
+      "passed": true,
+      "provenance": "fresh",
+      "baseline_commit": null,
+      "report_sha256": "842dc06320826152c52a7658dbc1b15db90d7e7b170652a25ad53d8cf3c41adc",
+      "source_hash_bindings_checked": 9,
+      "local_report": "work/osd_trim175_top_validation/result.json"
+    },
+    {
+      "name": "real_i2c",
+      "passed": true,
+      "provenance": "inherited_byte_identical_0800",
+      "baseline_commit": "fc90b3d8f7514b9e2261db20a7de3d54e8ab02bc",
+      "report_sha256": "87dcf7af602cb02f95ab5386979bbdf97b426ea42090ec3a2b63e767ec684289",
+      "source_hash_bindings_checked": 6,
+      "local_report": "work/osd_trim175_validation/full_policy_result.json"
+    },
+    {
+      "name": "ae_scene_handoff",
+      "passed": true,
+      "provenance": "inherited_byte_identical_0800",
+      "baseline_commit": "fc90b3d8f7514b9e2261db20a7de3d54e8ab02bc",
+      "report_sha256": "b1eb7e8d9bf57c825d1876bdadefb2a590e224348d0797c77ae007148bc0a64f",
+      "source_hash_bindings_checked": 1,
+      "local_report": "work/osd_trim175_validation/ae_scene_policy_result.json"
+    },
+    {
+      "name": "closed_loop",
+      "passed": true,
+      "provenance": "inherited_byte_identical_0800",
+      "baseline_commit": "fc90b3d8f7514b9e2261db20a7de3d54e8ab02bc",
+      "report_sha256": "25d58e0ade10881efbd60587a970a175bc73ab6187654668bf67ce7652ba43b7",
+      "source_hash_bindings_checked": 2,
+      "local_report": "work/osd_trim175_validation/closed_loop_scene_result.json"
+    }
+  ],
+  "evidence_sha256": {
+    "build_sources.json": "a8f272587e9efb67f47ddee8ac948291872ffa88fd73e07817397251bb421d68",
+    "audit.json": "3694643283a8aef471dad945cf821a2dc6a9cfcfb91cba3e8be8e49b14304239",
+    "engineering_review.json": "88e50c52850900b604db20f6c2b3b16d4e040bdb6e11970dd87cb4e9bbe679e5"
+  },
+  "raw_evidence_location": "Local complete delivery ZIP and workspace validation folders; raw reports retained unchanged."
+}
