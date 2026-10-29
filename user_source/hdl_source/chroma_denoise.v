@@ -100,7 +100,10 @@ module chroma_denoise #(
     input  wire             I_vsync,     // Aligned with rgb_in/I_de, asserted during vertical blanking.
     input  wire             I_frame,     // Aligned first active pixel; no RAM contents are reset.
     input  wire [23:0]      rgb_in,      // 输入 RGB888
-    output reg  [23:0]      rgb_out      // 输出 RGB888
+    output reg  [23:0]      rgb_out,     // 输出 RGB888
+    // Read-only processed luminance for the edge branch. No change to RGB.
+    output reg  [7:0]       O_edge_gray,
+    output wire            O_edge_de,O_edge_frame
 );
 
     //========================================================================
@@ -451,6 +454,21 @@ module chroma_denoise #(
     wire [7:0] r_out = (r_pre > 19'sd255) ? 8'd255 : (r_pre < 0) ? 8'd0 : r_pre[7:0];
     wire [7:0] g_out = (g_pre > 19'sd255) ? 8'd255 : (g_pre < 0) ? 8'd0 : g_pre[7:0];
     wire [7:0] b_out = (b_pre > 19'sd255) ? 8'd255 : (b_pre < 0) ? 8'd0 : b_pre[7:0];
+
+    // Observer tags follow the SAME register latency as processed luminance.
+    // Full LUMA_NR uses the extra aligned-current stage: sampled c -> c+4.
+    localparam integer EDGE_TAG_STAGES=NR_EN?((NR_MODE==2 && LUMA_NR)?5:4):1;
+    reg [EDGE_TAG_STAGES-1:0] edge_de_tags,edge_frame_tags;
+    assign O_edge_de=edge_de_tags[EDGE_TAG_STAGES-1];
+    assign O_edge_frame=edge_frame_tags[EDGE_TAG_STAGES-1];
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin O_edge_gray<=0;edge_de_tags<=0;edge_frame_tags<=0;end
+        else begin
+            O_edge_gray<=NR_EN?v_y:y_w;
+            edge_de_tags<=(edge_de_tags<<1)|I_de;
+            edge_frame_tags<=(edge_frame_tags<<1)|(I_frame && I_de);
+        end
+    end
 
     //========================================================================
     // 级 5 寄存器：输出

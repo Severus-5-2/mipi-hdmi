@@ -223,6 +223,8 @@ module design_top_wrapper (
     wire [23:0] S_rgb_sobel;       //Sobel边缘输出
     wire [23:0] S_video_sat;       // 饱和度增强后的像素（仅彩色原图模式使用）
     wire [23:0] S_video_dn;        // 色度降噪后的像素（仅彩色原图模式使用）
+    wire [7:0]  S_edge_gray;       // Existing filtered luminance, edge branch only
+    wire        S_edge_de, S_edge_frame;
 
     //===== 张铭晨 track_box：像素坐标 + 画框 + 坐标 OSD（D1）=====
     wire [10:0] S_pix_x, S_pix_x_1d, S_pix_x_2d;
@@ -624,7 +626,8 @@ module design_top_wrapper (
         .I_de   (R_gamma_de),       // Matches registered gamma RGB
         .I_vsync(R_gamma_vsync),.I_frame(R_gamma_frame),
         .rgb_in (S_video_bright),
-        .rgb_out(S_video_dn)
+        .rgb_out(S_video_dn),
+        .O_edge_gray(S_edge_gray),.O_edge_de(S_edge_de),.O_edge_frame(S_edge_frame)
     );
 
     //0.5 饱和度增强（Gamma 之后、MUX 之前，仅作用于彩色原图通路）
@@ -705,15 +708,20 @@ module design_top_wrapper (
     );
 
     //3. Sobel边缘检测
+    // Reuse existing luma denoising for cleaner dark-object outlines.
+    // Luminance, valid and frame-first tags have the same registered phase.
     sobel_3x3 #(
         .IMG_WIDTH (1280),
         .IMG_HEIGHT(720),
-        .EDGE_TH   (130)
+        .EDGE_TH   (63),
+        .DARK_TH   (31),.MID_TH(47),
+        .SUPPORT_TH(8),.BRIGHT_SUPPORT_TH(12)
     ) u_sobel_3x3(
         .clk      (S_hdmi_pixel_clk),
         .rst_n    (S_hdmi_rst_n),
-        .I_de     (S_hdmi_de),
-        .gray_in  (S_gray_out),
+        .I_de     (S_edge_de),
+        .I_frame  (S_edge_frame),
+        .gray_in  (S_edge_gray),
         .rgb_out  (S_rgb_sobel)
     );
 
