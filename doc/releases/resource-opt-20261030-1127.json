@@ -1,0 +1,52 @@
+{
+  "compiled_source_commit": "00c4517380edea0e8c4bd8c6e7e3dc2145d5d080",
+  "baseline_compiled_commit": "45f713f762410fd035a5972068bde3fda60264c3",
+  "physical_seed": 1,
+  "bit_sha256": "ad98de4eec31602e13a50693b13945a9405fd0765b860bf7322c8c4f3dc987fa",
+  "slack_ns": {
+    "SWNS": 0.111,
+    "STNS": 0.0,
+    "HWNS": 0.02,
+    "HTNS": 0.0
+  },
+  "STA_coverage": "94.95%",
+  "parent_STA_coverage": "95.70%",
+  "resources": {
+    "IO": "61   out of    160   38.12%",
+    "slice": "16578   out of  21216   78.14%",
+    "lut6": "16159   out of  21216   76.16%",
+    "reg": "15551",
+    "eram": "108   out of    108  100.00%",
+    "dsp": "37   out of     40   92.50%"
+  },
+  "parent_resources": {
+    "IO": "61   out of    160   38.12%",
+    "slice": "20869   out of  21216   98.36%",
+    "lut6": "19839   out of  21216   93.51%",
+    "reg": "20728",
+    "eram": "108   out of    108  100.00%",
+    "dsp": "37   out of     40   92.50%"
+  },
+  "no_new_clock_warnings": true,
+  "reviewed_differences": [
+    "Two high-throughput AWB dividers replaced by sparse iterative cores; exact valid Q/R and50-cycle done tested, including reset.",
+    "Only5521 AWB divider FF records removed; new332 AWB records plus4 retained zero-index occupancy records in otherwise byte-identical conn_label source; gain_start output net aliases the new divider start input.",
+    "Default MCU reported endpoint pair60/60 becomes61/61 due physical packing; no count drops, six44/44 APB branches and35 MCU Q nets remain. Input function equivalence bound to actual exported gate netlists.",
+    "MIPI LP direct data, sequential controls and active PLL clock input remain identical. A raw source-clock comparison differs only in the numeric name of the unconnected GCLK input. Original rawfalse retained.",
+    "STA coverage changes95.70% to94.95% with substantial AWB endpoint removal and packing changes; constraints and all14 check-category counts unchanged. Zero violations applies to analyzed paths; no100% timing coverage claimed.",
+    "First layout region warning remains archived; seed1 matches all baseline clock warning lines and final cascade count2. No clock/constraint exceptions were relaxed."
+  ],
+  "limits": [
+    "Not whole-chip formal equivalence. AWB regression uses shared signal_delay behavioral model; unchanged actual RAM not simulated in that test.",
+    "No board/flash/powercycle verification for this new bit. Prior1821 hardware confirmation is baseline only.",
+    "ERAM remains108/108; no cache capacity change."
+  ],
+  "bit_filename": "CameraToDSI_20261030_resource_opt_1127.bit",
+  "board_verified": false,
+  "full_bundle_sha256": "1ee5ef3f98c8d8a12ba6cda672c600de046e1fb74eef8f1f604c188933c140fa",
+  "gain_range": [
+    16,
+    175
+  ],
+  "rollback": "CameraToDSI_20261029_edge_lowlight_mem_1821.bit"
+}
