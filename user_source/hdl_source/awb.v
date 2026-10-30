@@ -204,7 +204,7 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
 *****************************************************************/
     //为了保证合理的延迟，这里使用了除法器
 
-      divider div_gen_G_R_r1 (
+      awb_frame_divider div_gen_G_R_r1 (
           .clk(I_clk),  // input wire aclk
           .rst(!I_rst_n),
           .start(gain_start),
@@ -214,7 +214,7 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
           .done(done[0])
       );
 
-      divider divide_G_B_r1 (
+      awb_frame_divider divide_G_B_r1 (
           .clk(I_clk),  // input wire aclk
           .rst(!I_rst_n),
           .start(gain_start),
